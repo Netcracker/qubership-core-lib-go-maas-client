@@ -10,7 +10,7 @@ require (
 	github.com/netcracker/qubership-core-lib-go-stomp-websocket/v3 v3.0.1
 	github.com/netcracker/qubership-core-lib-go/v3 v3.0.1
 	github.com/rabbitmq/amqp091-go v1.10.0
-	github.com/stretchr/testify v1.10.0
+	github.com/stretchr/testify v1.11.1
 )
 
 require (
