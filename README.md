@@ -29,7 +29,7 @@ MaaS Kafka client to preform MaaS operations related to Kafka
 [see API documentation](./kafka/api.go)
 
 ### Get/Create/Delete topic from non default kafka instance
-Use 'Instance designators' feature in MaaS to control which kafka instance should be used. See this [documentation](https://github.com/netcracker/maas/blob/main/README.md#instance-designators)
+Use 'Instance designators' feature in MaaS to control which kafka instance should be used. See this [documentation](https://github.com/netcracker/qubership-maas/blob/main/README.md#instance-designators)
 
 ### Create MaaS Kafka go client with Cloud-Core default configuration
 To create MaaS kafka go client with Cloud-Core defaults use the following library extension
