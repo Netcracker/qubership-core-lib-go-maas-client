@@ -7,8 +7,8 @@ toolchain go1.24.2
 require (
 	github.com/go-resty/resty/v2 v2.16.5
 	github.com/gorilla/websocket v1.5.3
-	github.com/netcracker/qubership-core-lib-go-stomp-websocket/v3 v3.0.1
-	github.com/netcracker/qubership-core-lib-go/v3 v3.0.1
+	github.com/netcracker/qubership-core-lib-go-stomp-websocket/v3 v3.0.2
+	github.com/netcracker/qubership-core-lib-go/v3 v3.1.0
 	github.com/rabbitmq/amqp091-go v1.10.0
 	github.com/stretchr/testify v1.11.1
 )
