@@ -2,7 +2,7 @@ module github.com/netcracker/qubership-core-lib-go-maas-client/v3
 
 go 1.23.0
 
-toolchain go1.24.2
+toolchain go1.25.1
 
 require (
 	github.com/go-resty/resty/v2 v2.16.5
