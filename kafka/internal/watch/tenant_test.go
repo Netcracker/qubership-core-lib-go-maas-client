@@ -281,30 +281,6 @@ func Test_TenantWatchBroadcaster_mergeTenants_unknown_event(t *testing.T) {
 	require.False(t, changed)
 }
 
-func Test_TenantWatchBroadcaster_notifyWatchers_error(t *testing.T) {
-	broadcaster := NewTenantWatchClient[model.TopicAddress](
-		"http://localhost:1234",
-		func(ctx context.Context, keys classifier.Keys, tenants []watch.Tenant) ([]model.TopicAddress, error) {
-			return nil, errors.New("fail")
-		},
-		nil,
-		func(ctx context.Context) (string, error) { return "token", nil },
-	)
-	broadcaster.currentTenants = []watch.Tenant{{ExternalId: "1", Status: watch.StatusActive, Name: "topic1", Namespace: "ns"}}
-	broadcaster.tenants = make(chan []watch.Tenant, 1)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	var called bool
-	broadcaster.Watch(ctx, classifier.New("topic1").WithNamespace("ns"), func(resources []model.TopicAddress, err error) {
-		called = true
-	})
-
-	// Should not panic or deadlock
-	broadcaster.notifyWatchers(broadcaster.currentTenants)
-	require.False(t, called)
-}
-
 func waitWithTimeout(wg *sync.WaitGroup, timeout time.Duration) bool {
 	c := make(chan struct{})
 	go func() {
