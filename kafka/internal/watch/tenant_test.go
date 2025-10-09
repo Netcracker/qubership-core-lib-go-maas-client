@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/netcracker/qubership-core-lib-go-maas-client/v3/classifier"
 	"github.com/netcracker/qubership-core-lib-go-maas-client/v3/kafka/model"
 	"github.com/netcracker/qubership-core-lib-go-maas-client/v3/watch"
 	go_stomp_websocket "github.com/netcracker/qubership-core-lib-go-stomp-websocket/v3"
@@ -261,6 +262,101 @@ func Test_mergeTenantsReadEventsClosedSubscription(t *testing.T) {
 	close(subscription.FrameCh)
 
 	assertions.True(waitWithTimeout(wg, timeout))
+}
+
+func Test_TenantWatchBroadcaster_Watch_and_notifyWatchers(t *testing.T) {
+	broadcaster := NewTenantWatchClient[model.TopicAddress](
+		"http://localhost:1234",
+		func(ctx context.Context, keys classifier.Keys, tenants []watch.Tenant) ([]model.TopicAddress, error) {
+			// Return one resource per tenant
+			res := make([]model.TopicAddress, len(tenants))
+			for i, tenant := range tenants {
+				res[i] = model.TopicAddress{TopicName: tenant.Name}
+			}
+			return res, nil
+		},
+		nil,
+		func(ctx context.Context) (string, error) { return "token", nil },
+	)
+
+	// Prepare tenants
+	tenants := []watch.Tenant{
+		{ExternalId: "1", Status: watch.StatusActive, Name: "topic1", Namespace: "ns"},
+		{ExternalId: "2", Status: watch.StatusActive, Name: "topic2", Namespace: "ns"},
+	}
+
+	// Set currentTenants and start processLoop
+	broadcaster.currentTenants = tenants
+	broadcaster.tenants = make(chan []watch.Tenant, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Watch and collect callback results
+	var mu sync.Mutex
+	var got [][]model.TopicAddress
+	wg := &sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		err := broadcaster.Watch(ctx, classifier.New("topic1").WithNamespace("ns"), func(resources []model.TopicAddress, err error) {
+			mu.Lock()
+			got = append(got, resources)
+			mu.Unlock()
+			wg.Done()
+		})
+		require.NoError(t, err)
+	}()
+
+	// Simulate tenant update
+	broadcaster.tenants <- tenants
+
+	// Wait for callback
+	ok := waitWithTimeout(wg, 2*time.Second)
+	require.True(t, ok)
+	mu.Lock()
+	require.NotEmpty(t, got)
+	require.Equal(t, "topic1", got[0][0].TopicName)
+	mu.Unlock()
+}
+
+func Test_TenantWatchBroadcaster_mergeTenants_unknown_event(t *testing.T) {
+	broadcaster := NewTenantWatchClient[model.TopicAddress](
+		"http://localhost:1234",
+		func(ctx context.Context, keys classifier.Keys, tenants []watch.Tenant) ([]model.TopicAddress, error) {
+			return nil, nil
+		},
+		nil,
+		func(ctx context.Context) (string, error) { return "token", nil },
+	)
+	event := &watch.TenantWatchEvent{
+		Type:    "UNKNOWN",
+		Tenants: []watch.Tenant{{ExternalId: "1", Status: watch.StatusActive}},
+	}
+	changed := broadcaster.mergeTenants(event)
+	require.False(t, changed)
+}
+
+func Test_TenantWatchBroadcaster_notifyWatchers_error(t *testing.T) {
+	broadcaster := NewTenantWatchClient[model.TopicAddress](
+		"http://localhost:1234",
+		func(ctx context.Context, keys classifier.Keys, tenants []watch.Tenant) ([]model.TopicAddress, error) {
+			return nil, errors.New("fail")
+		},
+		nil,
+		func(ctx context.Context) (string, error) { return "token", nil },
+	)
+	broadcaster.currentTenants = []watch.Tenant{{ExternalId: "1", Status: watch.StatusActive, Name: "topic1", Namespace: "ns"}}
+	broadcaster.tenants = make(chan []watch.Tenant, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var called bool
+	broadcaster.Watch(ctx, classifier.New("topic1").WithNamespace("ns"), func(resources []model.TopicAddress, err error) {
+		called = true
+	})
+
+	// Should not panic or deadlock
+	broadcaster.notifyWatchers(broadcaster.currentTenants)
+	require.False(t, called)
 }
 
 func waitWithTimeout(wg *sync.WaitGroup, timeout time.Duration) bool {
