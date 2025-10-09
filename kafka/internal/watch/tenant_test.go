@@ -294,3 +294,86 @@ func waitWithTimeout(wg *sync.WaitGroup, timeout time.Duration) bool {
 		return false // timed out
 	}
 }
+
+// Fake Resource type for generic parameter
+type fakeResource struct {
+	ID string
+}
+
+func (f fakeResource) GetClassifier() classifier.Keys {
+	return classifier.Keys{}
+}
+
+// Test mergeTenants logic
+func TestMergeTenants_Subscribe_Modified_Deleted(t *testing.T) {
+	assertions := require.New(t)
+
+	b := &TenantWatchBroadcaster[fakeResource]{}
+
+	subEvent := watch.TenantWatchEvent{
+		Type: watch.SUBSCRIBED,
+		Tenants: []watch.Tenant{
+			{ExternalId: "1", Status: watch.StatusActive},
+			{ExternalId: "2", Status: watch.StatusSuspended},
+		},
+	}
+	changed := b.mergeTenants(&subEvent)
+	assertions.True(changed, "expected tenants to change on SUBSCRIBED")
+	assertions.Equal(1, len(b.currentTenants), "expected 1 active tenant")
+	assertions.Equal("1", b.currentTenants[0].ExternalId, "expected tenant with ExternalId '1'")
+
+	modEvent := watch.TenantWatchEvent{
+		Type: watch.MODIFIED,
+		Tenants: []watch.Tenant{
+			{ExternalId: "3", Status: watch.StatusActive},
+			{ExternalId: "1", Status: watch.StatusSuspended},
+		},
+	}
+	b.mergeTenants(&modEvent)
+	assertions.Len(b.currentTenants, 1, "expected 1 active tenant")
+
+	delEvent := watch.TenantWatchEvent{
+		Type: watch.DELETED,
+		Tenants: []watch.Tenant{
+			{ExternalId: "3"},
+		},
+	}
+	b.mergeTenants(&delEvent)
+	assertions.Len(b.currentTenants, 0, "expected 0 active tenants after deletion")
+}
+
+// Test filterTenants
+func TestFilterTenants(t *testing.T) {
+	assertions := require.New(t)
+	tenants := []watch.Tenant{
+		{ExternalId: "1", Status: watch.StatusActive},
+		{ExternalId: "2", Status: watch.StatusSuspended},
+	}
+	active := filterTenants(tenants, func(tn watch.Tenant) bool {
+		return tn.Status == watch.StatusActive
+	})
+	assertions.Len(active, 1)
+	assertions.Equal("1", active[0].ExternalId)
+}
+
+// Test watcher processing (no panic)
+func TestWatcherProcessSafe(t *testing.T) {
+	called := false
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	w := &watcher[fakeResource]{
+		name:      "n",
+		namespace: "ns",
+		userCtx:   ctx,
+		callback: func(r []fakeResource, err error) {
+			called = true
+			panic("boom")
+		},
+	}
+	defer func() { _ = recover() }()
+	w.process([]fakeResource{{ID: "x"}}, nil)
+	if !called {
+		t.Fatal("callback was not called")
+	}
+}
