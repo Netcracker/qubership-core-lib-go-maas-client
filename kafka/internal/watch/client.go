@@ -6,8 +6,8 @@ import (
 	"sync"
 
 	"github.com/go-resty/resty/v2"
-	"github.com/netcracker/qubership-core-lib-go/v3/logging"
 	"github.com/netcracker/qubership-core-lib-go-maas-client/v3/classifier"
+	"github.com/netcracker/qubership-core-lib-go/v3/logging"
 )
 
 var logger logging.Logger
@@ -48,7 +48,8 @@ func (d *DefaultClient[T]) WatchTenantResources(ctx context.Context, keys classi
 }
 
 func (d *DefaultClient[T]) WatchOnCreateResources(ctx context.Context, keys classifier.Keys, callback func(T)) error {
-	watchersChan := make(chan []*watchHolder[T])
+	// Changed to buffered channel to prevent blocking on send.
+	watchersChan := make(chan []*watchHolder[T], 1)
 	ctx, cancelFunc := context.WithCancel(ctx)
 	prevWatchHolders := d.cancelWatchIfAnyAndSet(func() []*watchHolder[T] {
 		cancelFunc()
@@ -166,18 +167,19 @@ func (d *DefaultClient[T]) createWatchChan(ctx context.Context, classifiers []cl
 }
 
 func remove[T comparable](slice []T, target T) []T {
+	// make a copy to prevent side effects on the original slice
+	newSlice := append([]T(nil), slice...)
 	i := -1
-	for j, cls := range slice {
-		if cls == target {
+	for j, v := range newSlice {
+		if v == target {
 			i = j
 			break
 		}
 	}
 	if i != -1 {
-		return append(slice[:i], slice[i+1:]...)
-	} else {
-		return slice
+		return append(newSlice[:i], newSlice[i+1:]...)
 	}
+	return newSlice
 }
 
 type watchHolder[T Resource] struct {
