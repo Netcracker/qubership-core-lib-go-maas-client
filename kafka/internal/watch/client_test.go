@@ -8,8 +8,11 @@ import (
 	"time"
 
 	"github.com/go-resty/resty/v2"
+	"github.com/gorilla/websocket"
 	"github.com/netcracker/qubership-core-lib-go-maas-client/v3/classifier"
+	"github.com/netcracker/qubership-core-lib-go-maas-client/v3/watch"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type testResource struct {
@@ -200,4 +203,112 @@ func TestWatchOnCreateResources_CancellationAndCleanup(t *testing.T) {
 		defer client.watchLock.RUnlock()
 		return client.watchCancel == nil
 	}, 500*time.Millisecond, 50*time.Millisecond, "watchCancel should be cleared after cancellation")
+}
+
+func TestWatch_InvalidClassifier_MissingFields(t *testing.T) {
+	b := NewTenantWatchClient[mockResource](
+		"http://example.com",
+		func(ctx context.Context, keys classifier.Keys, tenants []watch.Tenant) ([]mockResource, error) {
+			return nil, nil
+
+		},
+		nil,
+		func(ctx context.Context) (string, error) { return "token", nil },
+	)
+
+	err := b.Watch(context.Background(), classifier.Keys{}, func([]mockResource, error) {})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "classifier must contain both name and namespace")
+}
+
+func TestWatch_InvalidClassifier_WithTenantId(t *testing.T) {
+	b := NewTenantWatchClient[mockResource](
+		"http://example.com",
+		func(ctx context.Context, keys classifier.Keys, tenants []watch.Tenant) ([]mockResource, error) {
+			return nil, nil
+		},
+		nil,
+		func(ctx context.Context) (string, error) { return "token", nil },
+	)
+
+	classifier := classifier.Keys{
+		classifier.Name:      "res1",
+		classifier.Namespace: "ns",
+		classifier.TenantId:  "some-tenant",
+	}
+	err := b.Watch(context.Background(), classifier, func([]mockResource, error) {})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "classifier cannot contain")
+}
+
+func TestWatch_ValidClassifier_StartsBroadcasterAndTriggersCallback(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var mu sync.Mutex
+	var called bool
+	var received []testResource
+
+	client := NewTenantWatchClient[testResource](
+		"http://example.com",
+		func(ctx context.Context, keys classifier.Keys, tenants []watch.Tenant) ([]testResource, error) {
+			return []testResource{{classifier: keys}}, nil
+		},
+		nil,
+		func(ctx context.Context) (string, error) { return "token", nil },
+	)
+
+	client.connectToWebSocket = func(ctx context.Context, tenantManagerUrl string, dialer *websocket.Dialer, authSupplier func(ctx context.Context) (string, error), onConnect func()) error {
+		onConnect()
+		return nil
+	}
+
+	callback := func(r []testResource, err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		called = true
+		received = r
+	}
+
+	// Watch should not error on valid input
+	err := client.Watch(ctx, classifier.Keys{
+		classifier.Name:      "r1",
+		classifier.Namespace: "ns",
+	}, callback)
+	require.NoError(t, err)
+
+	// Simulate broadcaster notifying tenants manually
+	client.NotifyForTest([]watch.Tenant{{ExternalId: "t1", Status: "active"}})
+
+	timeout := time.After(500 * time.Millisecond)
+	tick := time.Tick(5 * time.Millisecond)
+
+	waited := false
+	for !waited {
+		select {
+		case <-timeout:
+			waited = true
+		case <-tick:
+			if called {
+				waited = true
+				break
+			}
+		}
+	}
+
+	assert.True(t, called, "callback should be triggered")
+	require.Len(t, received, 1)
+	assert.Equal(t, "r1", received[0].classifier["name"])
+	assert.Equal(t, "ns", received[0].classifier["namespace"])
+}
+
+func (b *TenantWatchBroadcaster[T]) NotifyForTest(tenants []watch.Tenant) {
+	if b.internalProcCtx == nil {
+		b.internalProcCtx, b.cancel = context.WithCancel(context.Background())
+		go b.processLoop(b.internalProcCtx)
+	}
+	select {
+	case b.tenants <- tenants:
+	default:
+	}
 }
