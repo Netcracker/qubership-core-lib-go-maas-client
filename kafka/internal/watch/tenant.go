@@ -24,7 +24,7 @@ type TenantWatchClient[T Resource] interface {
 func NewTenantWatchClient[T Resource](tenantManagerUrl string,
 	getResources func(ctx context.Context, keys classifier.Keys, tenants []watch.Tenant) ([]T, error),
 	dialer *websocket.Dialer, authSupplier func(ctx context.Context) (string, error)) *TenantWatchBroadcaster[T] {
-	return &TenantWatchBroadcaster[T]{
+	tenantWatchBroadcaster := &TenantWatchBroadcaster[T]{
 		watchers:         []*watcher[T]{},
 		tenants:          make(chan []watch.Tenant),
 		lock:             &sync.RWMutex{},
@@ -35,21 +35,29 @@ func NewTenantWatchClient[T Resource](tenantManagerUrl string,
 		authSupplier:     authSupplier,
 		watchCounter:     0,
 	}
+	tenantWatchBroadcaster.connectToWebSocket = func(ctx context.Context, tenantManagerUrl string,
+		dialer *websocket.Dialer,
+		authSupplier func(ctx context.Context) (string, error),
+		onConnect func()) error {
+		return tenantWatchBroadcaster.connectToWS(ctx, tenantManagerUrl, dialer, authSupplier, onConnect)
+	}
+	return tenantWatchBroadcaster
 }
 
 type TenantWatchBroadcaster[T Resource] struct {
-	watchers         []*watcher[T]
-	internalProcCtx  context.Context
-	currentTenants   []watch.Tenant
-	tenants          chan []watch.Tenant
-	lock             *sync.RWMutex
-	cancel           context.CancelFunc
-	startOnce        *sync.Once
-	getResources     func(ctx context.Context, keys classifier.Keys, tenants []watch.Tenant) ([]T, error)
-	tenantManagerUrl string
-	dialer           *websocket.Dialer
-	authSupplier     func(ctx context.Context) (string, error)
-	watchCounter     int
+	watchers           []*watcher[T]
+	internalProcCtx    context.Context
+	currentTenants     []watch.Tenant
+	tenants            chan []watch.Tenant
+	lock               *sync.RWMutex
+	cancel             context.CancelFunc
+	startOnce          *sync.Once
+	getResources       func(ctx context.Context, keys classifier.Keys, tenants []watch.Tenant) ([]T, error)
+	tenantManagerUrl   string
+	dialer             *websocket.Dialer
+	authSupplier       func(ctx context.Context) (string, error)
+	watchCounter       int
+	connectToWebSocket func(ctx context.Context, tenantManagerUrl string, dialer *websocket.Dialer, authSupplier func(ctx context.Context) (string, error), onConnect func()) error
 }
 
 func (b *TenantWatchBroadcaster[T]) start() error {
@@ -82,7 +90,7 @@ func (b *TenantWatchBroadcaster[T]) start() error {
 					default:
 					}
 				}
-				err = b.connectToWS(b.internalProcCtx, b.tenantManagerUrl, b.dialer, b.authSupplier, onConnect)
+				err = b.connectToWebSocket(b.internalProcCtx, b.tenantManagerUrl, b.dialer, b.authSupplier, onConnect)
 				if err != nil {
 					if errors.Is(err, context.Canceled) || retries >= util.DefaultRetryAttempts {
 						return

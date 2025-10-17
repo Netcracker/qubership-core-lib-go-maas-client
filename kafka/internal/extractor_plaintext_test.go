@@ -26,3 +26,26 @@ func Test_PlaintextExtractor_NoCreds_Extract(t *testing.T) {
 	assertions.Equal("PLAINTEXT", connectionProperties.Protocol)
 	assertions.Equal("localkafka.kafka-cluster:9092", connectionProperties.BootstrapServers[0])
 }
+
+func Test_PlaintextExtractor_WithCreds_Extract(t *testing.T) {
+	extractor := &PlaintextExtractor{}
+	connectionProperties := extractor.Extract(model.TopicAddress{
+		Classifier:    classifier.New("test.topic").WithNamespace("test-namespace"),
+		TopicName:     "maas.test-namespace.test.topic",
+		NumPartitions: 1,
+		BoostrapServers: map[string][]string{
+			"PLAINTEXT": {"localkafka.kafka-cluster:9092"},
+		},
+		Credentials: map[string]model.TopicUserCredentials{
+			"plain": {
+				Username: "user",
+				Password: "pass",
+			},
+		},
+	})
+	require.NotNil(t, connectionProperties)
+	require.Equal(t, "PLAIN", connectionProperties.SaslMechanism)
+	require.Equal(t, "user", connectionProperties.Username)
+	require.Equal(t, "pass", connectionProperties.Password)
+	require.Equal(t, "PLAINTEXT", connectionProperties.Protocol)
+}
