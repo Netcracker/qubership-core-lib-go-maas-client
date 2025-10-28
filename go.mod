@@ -5,8 +5,8 @@ go 1.25.3
 require (
 	github.com/go-resty/resty/v2 v2.16.5
 	github.com/gorilla/websocket v1.5.3
-	github.com/netcracker/qubership-core-lib-go-stomp-websocket/v3 v3.0.3
-	github.com/netcracker/qubership-core-lib-go/v3 v3.1.1
+	github.com/netcracker/qubership-core-lib-go-stomp-websocket/v3 v3.1.0
+	github.com/netcracker/qubership-core-lib-go/v3 v3.2.0
 	github.com/rabbitmq/amqp091-go v1.10.0
 	github.com/stretchr/testify v1.11.1
 )
@@ -28,7 +28,7 @@ require (
 	github.com/rogpeppe/go-internal v1.9.0 // indirect
 	github.com/viney-shih/go-lock v1.1.2 // indirect
 	golang.org/x/net v0.33.0 // indirect
-	golang.org/x/sync v0.14.0 // indirect
+	golang.org/x/sync v0.15.0 // indirect
 	golang.org/x/sys v0.33.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
