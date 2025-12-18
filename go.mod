@@ -5,8 +5,8 @@ go 1.25.5
 require (
 	github.com/go-resty/resty/v2 v2.17.1
 	github.com/gorilla/websocket v1.5.3
-	github.com/netcracker/qubership-core-lib-go-stomp-websocket/v3 v3.1.5
-	github.com/netcracker/qubership-core-lib-go/v3 v3.2.5
+	github.com/netcracker/qubership-core-lib-go-stomp-websocket/v3 v3.1.6
+	github.com/netcracker/qubership-core-lib-go/v3 v3.3.0
 	github.com/rabbitmq/amqp091-go v1.10.0
 	github.com/stretchr/testify v1.11.1
 )
