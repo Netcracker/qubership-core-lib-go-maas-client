@@ -5,8 +5,8 @@ go 1.25.6
 require (
 	github.com/go-resty/resty/v2 v2.17.1
 	github.com/gorilla/websocket v1.5.3
-	github.com/netcracker/qubership-core-lib-go-stomp-websocket/v3 v3.1.6
-	github.com/netcracker/qubership-core-lib-go/v3 v3.3.0
+	github.com/netcracker/qubership-core-lib-go-stomp-websocket/v3 v3.1.7
+	github.com/netcracker/qubership-core-lib-go/v3 v3.3.1
 	github.com/rabbitmq/amqp091-go v1.10.0
 	github.com/stretchr/testify v1.11.1
 )
@@ -19,7 +19,7 @@ require (
 	github.com/knadh/koanf/maps v0.1.2 // indirect
 	github.com/knadh/koanf/parsers/yaml v1.0.0 // indirect
 	github.com/knadh/koanf/providers/env v1.1.0 // indirect
-	github.com/knadh/koanf/providers/file v1.2.0 // indirect
+	github.com/knadh/koanf/providers/file v1.2.1 // indirect
 	github.com/knadh/koanf/v2 v2.3.0 // indirect
 	github.com/kr/pretty v0.3.0 // indirect
 	github.com/mitchellh/copystructure v1.2.0 // indirect
