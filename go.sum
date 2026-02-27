@@ -61,12 +61,16 @@ github.com/netcracker/qubership-core-lib-go-stomp-websocket/v3 v3.2.0 h1:cgZzEoT
 github.com/netcracker/qubership-core-lib-go-stomp-websocket/v3 v3.2.0/go.mod h1:yLi/Lkfz6M+xHDjf2AUyBhhzwzdGxRgRlDq3f17x/cE=
 github.com/netcracker/qubership-core-lib-go-stomp-websocket/v3 v3.3.0 h1:3tNbd2e8v3TvKqWmo4I4R8kVGAUAJOd+EpPNATu6LNc=
 github.com/netcracker/qubership-core-lib-go-stomp-websocket/v3 v3.3.0/go.mod h1:MgJQ6WJXA2GTSTluBXHY7wIgfowYPmRn7EmxSqwYSCY=
+github.com/netcracker/qubership-core-lib-go-stomp-websocket/v3 v3.4.0 h1:KKtDMHLURMpM0ULnf/suaOdEKwuDaQwKeEZ7fw5qwJY=
+github.com/netcracker/qubership-core-lib-go-stomp-websocket/v3 v3.4.0/go.mod h1:nxkXTR2pnYNOuR9f15VpmllzHwS8KVvHfV08O9ONlBc=
 github.com/netcracker/qubership-core-lib-go/v3 v3.3.1 h1:rvBOLY8BtCO+0YxBFurl+sd11tda6I7Nalq3SjPNMdg=
 github.com/netcracker/qubership-core-lib-go/v3 v3.3.1/go.mod h1:komq6cK5bGZx5fwnwIo2YZGOXTEITVJ3xCt4VLL4CcA=
 github.com/netcracker/qubership-core-lib-go/v3 v3.4.0 h1:PtVq5JWR8Cy+ymBJfbI5LjH4oedBUttebJ5+r3ap6wA=
 github.com/netcracker/qubership-core-lib-go/v3 v3.4.0/go.mod h1:tXcabbpYNAvm4sSU2i95mRsQo76mvUqJgbX0lMgtF1U=
 github.com/netcracker/qubership-core-lib-go/v3 v3.5.0 h1:uKuETXXHZ54Zvak5L6zy8eFVH6bBYL9KAVq4+0GpkyM=
 github.com/netcracker/qubership-core-lib-go/v3 v3.5.0/go.mod h1:tXcabbpYNAvm4sSU2i95mRsQo76mvUqJgbX0lMgtF1U=
+github.com/netcracker/qubership-core-lib-go/v3 v3.6.0 h1:qk1pe+mUtfOQAw/ohph5PvSRW6OPQLzht4BzDa3Wf0Y=
+github.com/netcracker/qubership-core-lib-go/v3 v3.6.0/go.mod h1:tXcabbpYNAvm4sSU2i95mRsQo76mvUqJgbX0lMgtF1U=
 github.com/pbnjay/memory v0.0.0-20210728143218-7b4eea64cf58 h1:onHthvaw9LFnH4t2DcNVpwGmV9E1BkGknEliJkfwQj0=
 github.com/pbnjay/memory v0.0.0-20210728143218-7b4eea64cf58/go.mod h1:DXv8WO4yhMYhSNPKjeNKa5WY9YCIEBRbNzFFPJbWO6Y=
 github.com/pkg/diff v0.0.0-20210226163009-20ebb0f2a09e h1:aoZm08cpOy4WuID//EZDgcC4zIxODThtZNPirFr42+A=
