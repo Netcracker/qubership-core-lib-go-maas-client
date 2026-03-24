@@ -79,7 +79,7 @@ func (d *DefaultClient[T]) WatchOnCreateResources(ctx context.Context, keys clas
 						watchersChan <- watchHolders
 						return
 					} else {
-						logger.Error("failed to send request to maas-agent. Cause: %s", err)
+						logger.Error("failed to send request to maas-agent. Cause: %+v", err)
 					}
 				} else {
 					watchHolders = d.processWatchResponse(watchHolders, func(holders []*watchHolder[T]) (result []*watchHolder[T]) {
@@ -90,7 +90,7 @@ func (d *DefaultClient[T]) WatchOnCreateResources(ctx context.Context, keys clas
 						}
 						resources, cErr := d.converter(response)
 						if cErr != nil {
-							logger.Error("failed to convert response. Cause: %s", cErr)
+							logger.Error("failed to convert response. Cause: %+v", cErr)
 							return
 						}
 						for _, resource := range resources {
