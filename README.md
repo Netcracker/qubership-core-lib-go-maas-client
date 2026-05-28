@@ -56,3 +56,4 @@ MaaS Rabbit client to preform MaaS operations related to Rabbit
 ### Create MaaS Rabbit go client with Cloud-Core default configuration
 To create MaaS rabbit go client with Cloud-Core defaults use the following library extension
 [libs/go/maas/core](https://github.com/netcracker/qubership-core-lib-go-maas-core)
+
