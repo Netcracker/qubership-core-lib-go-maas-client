@@ -23,7 +23,7 @@ func TestVhost_Getters(t *testing.T) {
 
 func TestVhost_GetPassword_Err(t *testing.T) {
 	vhost := Vhost{
-		EncodedPassword: "vault:abc",
+		EncodedPassword: "notimplemented:abc",
 	}
 
 	_, err := vhost.GetPassword()
