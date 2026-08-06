@@ -7,7 +7,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/netcracker/qubership-core-lib-go-stomp-websocket/v3 v3.5.6
 	github.com/netcracker/qubership-core-lib-go/v3 v3.13.2
-	github.com/rabbitmq/amqp091-go v1.12.0
+	github.com/rabbitmq/amqp091-go v1.13.0
 	github.com/stretchr/testify v1.11.1
 )
 
