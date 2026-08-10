@@ -278,29 +278,53 @@ func (b *TenantWatchBroadcaster[T]) processLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case tenants := <-b.tenants:
-			b.notifyWatchers(tenants)
+			b.notifyWatchers(ctx, tenants)
 		}
 	}
 }
 
-func (b *TenantWatchBroadcaster[T]) notifyWatchers(tenants []watch.Tenant) {
-	b.lock.Lock()
-	defer b.lock.Unlock()
+// notifyWatchers fetches resources per watcher and hands them to its queue.
+func (b *TenantWatchBroadcaster[T]) notifyWatchers(ctx context.Context, tenants []watch.Tenant) {
+	b.lock.RLock()
+	watchers := make([]*watcher[T], len(b.watchers))
+	copy(watchers, b.watchers)
+	b.lock.RUnlock()
 
-	for _, w := range b.watchers {
-		if reflect.DeepEqual(w.lastNotifiedTenants, tenants) {
+	for _, w := range watchers {
+		if b.alreadyNotified(w, tenants) {
 			continue
 		}
 		keys := classifier.New(w.name).WithNamespace(w.namespace)
 		resources, err := b.getResources(w.userCtx, keys, tenants)
 		if err != nil {
-			logger.ErrorC(b.internalProcCtx, "Failed to get resources: %s", err.Error())
+			logger.ErrorC(ctx, "Failed to get resources: %s", err.Error())
 			w.stop()
-		} else if len(resources) > 0 {
-			w.queue <- resources
-			w.lastNotifiedTenants = tenants
+			continue
+		}
+		if len(resources) == 0 {
+			continue
+		}
+		select {
+		case w.queue <- resources:
+			b.setNotified(w, tenants)
+		case <-w.userCtx.Done():
+			// watcher is going away and will not drain its queue
+		case <-ctx.Done():
+			return
 		}
 	}
+}
+
+func (b *TenantWatchBroadcaster[T]) alreadyNotified(w *watcher[T], tenants []watch.Tenant) bool {
+	b.lock.RLock()
+	defer b.lock.RUnlock()
+	return reflect.DeepEqual(w.lastNotifiedTenants, tenants)
+}
+
+func (b *TenantWatchBroadcaster[T]) setNotified(w *watcher[T], tenants []watch.Tenant) {
+	b.lock.Lock()
+	defer b.lock.Unlock()
+	w.lastNotifiedTenants = tenants
 }
 
 // mergeTenants applies the event to currentTenants. All writes go through here,
