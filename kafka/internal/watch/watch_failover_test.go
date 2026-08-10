@@ -23,9 +23,9 @@ func errorResponse(code int) *resty.Response {
 	}}
 }
 
-// countingWatchClient builds a DefaultClient whose every watch request fails
-// with 503, counting the attempts. intervals are applied as-is, so a caller can
-// pass zero values to exercise the fallback path.
+// countingWatchClient builds a DefaultClient whose watch requests always fail
+// with 503, counting the attempts. Intervals are applied as-is, so zero values
+// exercise the fallback path.
 func countingWatchClient(count *int32, retryInterval, maxRetryInterval time.Duration) *DefaultClient[testResource] {
 	httpClient := resty.NewWithClient(&http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -62,13 +62,11 @@ func runFailingWatchFor(t *testing.T, client *DefaultClient[testResource], count
 
 func TestWatchOnCreateResources_BusyLoopIsBounded(t *testing.T) {
 	var count int32
-	// 100ms backoff over a 300ms window: a working backoff yields roughly 3
-	// attempts, an absent one yields thousands.
+	// 100ms backoff over a 300ms window: with backoff ~3 attempts, without it thousands
 	attempts := runFailingWatchFor(t, countingWatchClient(&count, 100*time.Millisecond, 300*time.Millisecond),
 		&count, 300*time.Millisecond)
 
-	// Lower bound matters as much as the upper one: without it the assertion
-	// also passes when the loop never ran and nothing was verified.
+	// the lower bound keeps the test from passing when the loop never ran
 	assert.GreaterOrEqual(t, attempts, 1, "watch loop did not run at all — the test would pass vacuously")
 	assert.LessOrEqual(t, attempts, 10, "no backoff between failed watch requests")
 }
@@ -79,8 +77,7 @@ func TestWatchOnCreateResources_BusyLoopIsBounded(t *testing.T) {
 // instead of busy-looping with a zero delay.
 func TestWatchOnCreateResources_BusyLoopIsBoundedWithoutExplicitIntervals(t *testing.T) {
 	var count int32
-	// Zero intervals: the fallback must kick in and use util.DefaultRetryInterval
-	// (1s), so a 300ms window sees the first attempt and then the backoff.
+	// zero intervals must fall back to util.DefaultRetryInterval, not to no delay
 	attempts := runFailingWatchFor(t, countingWatchClient(&count, 0, 0), &count, 300*time.Millisecond)
 
 	assert.GreaterOrEqual(t, attempts, 1, "watch loop did not run at all — the test would pass vacuously")

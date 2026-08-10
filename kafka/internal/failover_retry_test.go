@@ -67,9 +67,7 @@ func failoverCrudClient(agentUrl string, retryAttempts int, retryInterval time.D
 }
 
 // Test_Failover_ResponseTable checks GetOrCreateTopic against each response
-// shape maas-agent can produce: read-only (405), agent-down (500), expired
-// token (401) and connection resets must be retried and eventually succeed,
-// while genuinely permanent codes (400, 403) must fail on the first attempt.
+// shape maas-agent can produce during a switchover.
 func Test_Failover_ResponseTable(t *testing.T) {
 	successBody := `{"addresses":{"PLAINTEXT":["b1:9092"]},"name":"maas.test-namespace.test.topic","classifier":{"name":"test.topic","namespace":"test-namespace"}}`
 	tmf405Body := `{"code":"MAAS-0600","reason":"database is in read-only mode"}`
@@ -119,8 +117,7 @@ func Test_Failover_ResponseTable(t *testing.T) {
 			expectedRequests: 1,
 		},
 		{
-			// The M2M token is re-fetched on every attempt, so a token that expired
-			// in flight clears on the next one - the single case a 401 retry exists for.
+			// the single case a 401 retry exists for
 			name: "token expired in flight: 401 then success",
 			steps: []stepBehavior{
 				{status: http.StatusUnauthorized, body: `{"error":"unauthorized"}`},
@@ -130,10 +127,7 @@ func Test_Failover_ResponseTable(t *testing.T) {
 			expectedRequests: 2,
 		},
 		{
-			// A 401 that keeps coming back means the provider is handing out a token
-			// the server rejects, and it has no way of being told so. Further attempts
-			// resend the same token, so the budget is deliberately tighter than the
-			// generic one: 1 + MaxAuthRetries, not the full RetryAttempts of 5.
+			// tighter than the generic budget: 1 + MaxAuthRetries, not RetryAttempts
 			name: "rejected credentials: 401 gives up after MaxAuthRetries, not the full budget",
 			steps: []stepBehavior{
 				{status: http.StatusUnauthorized, body: `{"error":"unauthorized"}`},
@@ -188,19 +182,11 @@ func Test_Failover_GetTopic_404NotRetried(t *testing.T) {
 	assertions.Equal(1, requestCount, "404 must not be retried")
 }
 
-// Test_Failover_RetryBudgetNotMultipliedByRestyRetry checks that our retry
-// budget is not multiplied by a retry configured on the underlying HTTP client.
-//
-// The fault has to be a transport error, not a 5xx: resty retries when the
-// round trip returns an error, and a 5xx response is a successful round trip, so
-// it is left alone unless an explicit RetryCondition is registered. Testing this
-// with a 5xx would assert something that holds regardless of SetRetryCount and
-// would miss the case that actually multiplies - a rescheduled maas-agent
-// refusing connections.
-//
-// Counting happens at the listener rather than in a handler, because a refused
-// connection never reaches one.
-func Test_Failover_RetryBudgetNotMultipliedByRestyRetry(t *testing.T) {
+// Test_Failover_TransportErrorSpendsExactlyTheConfiguredBudget pins the attempt
+// count on the transport-error path - a maas-agent pod going away mid-request.
+// Counting happens at the listener because a dropped connection never reaches a
+// handler.
+func Test_Failover_TransportErrorSpendsExactlyTheConfiguredBudget(t *testing.T) {
 	assertions := require.New(t)
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -218,17 +204,15 @@ func Test_Failover_RetryBudgetNotMultipliedByRestyRetry(t *testing.T) {
 			}
 			atomic.AddInt32(&connections, 1)
 			// Close without answering: the same shape as an agent whose pod is going
-			// away mid-request, and a transport error for resty.
+			// away mid-request, and a transport error for the HTTP client.
 			_ = conn.Close()
 		}
 	}()
 
-	httpClient := resty.New().SetRetryCount(10)
-
 	client := &CrudClient{
 		MaasAgentUrl:  agentUrl,
 		Namespace:     testNamespace,
-		HttpClient:    httpClient,
+		HttpClient:    resty.New(),
 		Auth:          func(ctx context.Context) (string, error) { return testToken, nil },
 		RetryAttempts: 3,
 		RetryInterval: 5 * time.Millisecond,
@@ -241,7 +225,53 @@ func Test_Failover_RetryBudgetNotMultipliedByRestyRetry(t *testing.T) {
 	<-done
 
 	assertions.Equal(int32(3), atomic.LoadInt32(&connections),
-		"resty retried on top of our budget: expected 3 attempts, the client made more")
+		"the transport-error path must spend exactly RetryAttempts attempts, no more and no fewer")
+}
+
+// Test_Failover_UnresponsiveAgentIsBoundedWithoutCallerDeadline checks that a
+// call with context.Background() still returns: the agent keeps the connection
+// open and never answers, so only the per-attempt timeout can end it.
+func Test_Failover_UnresponsiveAgentIsBoundedWithoutCallerDeadline(t *testing.T) {
+	assertions := require.New(t)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	assertions.NoError(err)
+	defer listener.Close()
+
+	held := make(chan net.Conn, 8)
+	go func() {
+		for {
+			conn, aErr := listener.Accept()
+			if aErr != nil {
+				close(held)
+				return
+			}
+			held <- conn // accepted and never answered
+		}
+	}()
+	defer func() {
+		for conn := range held {
+			_ = conn.Close()
+		}
+	}()
+
+	client := &CrudClient{
+		MaasAgentUrl:   "http://" + listener.Addr().String(),
+		Namespace:      testNamespace,
+		HttpClient:     resty.New(),
+		Auth:           func(ctx context.Context) (string, error) { return testToken, nil },
+		RetryAttempts:  2,
+		RetryInterval:  5 * time.Millisecond,
+		AttemptTimeout: 100 * time.Millisecond,
+	}
+
+	start := time.Now()
+	_, err = client.GetOrCreateTopic(context.Background(), classifier.New("test"))
+	elapsed := time.Since(start)
+
+	assertions.Error(err)
+	assertions.Less(elapsed, 2*time.Second,
+		"a caller without a deadline must still be bounded by AttemptTimeout, took %s", elapsed)
 }
 
 // Test_Failover_ContextCancellation checks that a short context deadline

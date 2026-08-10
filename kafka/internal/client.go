@@ -90,12 +90,17 @@ type CrudClient struct {
 	HttpClient    *resty.Client
 	RetryAttempts int
 	RetryInterval time.Duration
+	// AttemptTimeout bounds one request, see util.AttemptContext.
+	AttemptTimeout time.Duration
 }
 
 func (d *CrudClient) GetOrCreateTopic(ctx context.Context, keys classifier.Keys, options ...model.TopicCreateOptions) (*model.TopicAddress, error) {
 	var topicAddress *model.TopicAddress
 	respClassifier := util.NewResponseClassifier()
 	err := util.NewRetry(d.RetryAttempts, d.RetryInterval).RunCtx(ctx, func(ctx context.Context) error {
+		ctx, cancel := util.AttemptContext(ctx, d.AttemptTimeout)
+		defer cancel()
+
 		var opt model.TopicCreateOptions
 		if len(options) == 1 {
 			opt = options[0]
@@ -144,6 +149,9 @@ func (d *CrudClient) GetTopic(ctx context.Context, keys classifier.Keys) (*model
 	var topicAddress *model.TopicAddress
 	respClassifier := util.NewResponseClassifier()
 	err := util.NewRetry(d.RetryAttempts, d.RetryInterval).RunCtx(ctx, func(ctx context.Context) error {
+		ctx, cancel := util.AttemptContext(ctx, d.AttemptTimeout)
+		defer cancel()
+
 		logger.InfoC(ctx, "Get topic by classifier %v", keys)
 		request := d.HttpClient.R().SetContext(ctx).SetBody(keys)
 		response, err := request.Post(d.MaasAgentUrl + "/api/v1/kafka/topic/get-by-classifier")
@@ -175,6 +183,9 @@ func (d *CrudClient) GetTopic(ctx context.Context, keys classifier.Keys) (*model
 func (d *CrudClient) DeleteTopic(ctx context.Context, classifier classifier.Keys) error {
 	respClassifier := util.NewResponseClassifier()
 	return util.NewRetry(d.RetryAttempts, d.RetryInterval).RunCtx(ctx, func(ctx context.Context) error {
+		ctx, cancel := util.AttemptContext(ctx, d.AttemptTimeout)
+		defer cancel()
+
 		body := TopicSearchRequest{Classifier: classifier}
 		logger.InfoC(ctx, "Get or Create topic by classifier %v", classifier)
 		request := d.HttpClient.R().SetContext(ctx).SetBody(body)

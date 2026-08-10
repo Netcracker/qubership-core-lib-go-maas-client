@@ -58,6 +58,8 @@ type CrudClient struct {
 	HttpClient    *resty.Client
 	RetryAttempts int
 	RetryInterval time.Duration
+	// AttemptTimeout bounds one request, see util.AttemptContext.
+	AttemptTimeout time.Duration
 }
 
 // retry wraps CRUD calls; util.Retry itself falls back to util.Default*
@@ -70,6 +72,9 @@ func (d *CrudClient) GetOrCreateVhost(ctx context.Context, classifier classifier
 	var result model.Vhost
 	respClassifier := util.NewResponseClassifier()
 	err := d.retry().RunCtx(ctx, func(ctx context.Context) error {
+		ctx, cancel := util.AttemptContext(ctx, d.AttemptTimeout)
+		defer cancel()
+
 		logger.InfoC(ctx, "Get or Create vhost by classifier %v", classifier)
 		request := d.HttpClient.R().SetContext(ctx).SetBody(classifier)
 
@@ -101,6 +106,9 @@ func (d *CrudClient) GetVhost(ctx context.Context, classifier classifier.Keys) (
 	var notFound bool
 	respClassifier := util.NewResponseClassifier()
 	err := d.retry().RunCtx(ctx, func(ctx context.Context) error {
+		ctx, cancel := util.AttemptContext(ctx, d.AttemptTimeout)
+		defer cancel()
+
 		logger.InfoC(ctx, "Get vhost by classifier %v", classifier)
 		request := d.HttpClient.R().SetContext(ctx).SetBody(classifier)
 

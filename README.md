@@ -85,5 +85,14 @@ retries whenever the round trip returns an error — exactly the connection-refu
 case a rescheduled agent produces — and leaving it enabled multiplied the two
 budgets into up to `RetryAttempts x (RetryCount+1)` TCP attempts.
 
+That client carries no timeout either, and deliberately so: it is shared with the
+topic watch, which long-polls for 60s, so any value short enough to bound a CRUD
+call would cut every legitimate poll short.
+
+CRUD calls are bounded instead by `CrudClient.AttemptTimeout`
+(`util.DefaultAttemptTimeout`, 30s), applied per attempt, so a caller passing
+`context.Background()` to an unresponsive agent still gets an error rather than
+hanging. A shorter deadline on the caller's context wins over it.
+
 `GetTopic`/`GetVhost` keep treating `404` as "not found" and return `nil` after
 a single request.
