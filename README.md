@@ -72,22 +72,16 @@ Which responses are retried:
 |---|---|---|
 | 5xx | yes | includes the `500` maas-agent returns when it cannot reach maas-service at all |
 | 429 | yes | throttling |
-| **405** | **yes** | maas-service maps PostgreSQL error `25006` (READ ONLY SQL TRANSACTION) to `405`, so a write against a demoted Patroni node during a leader switchover arrives as `405`, not as `5xx` |
-| **401** | **once** (`util.MaxAuthRetries`) | covers exactly one case: a token handed out with a sliver of life left that expired in flight, which the next attempt re-fetches. Nothing else — retrying cannot ask `TokenProvider` for a new token, only for whatever is cached, so a rejected token comes back identical. A provider that is itself unavailable returns an error instead of a 401 and is retried on its own path |
+| **405** | **yes** | maas-service maps PostgreSQL error `25006` (READ ONLY SQL TRANSACTION) to `405`, so a write against a demoted Patroni node during a switchover arrives as `405`, not as `5xx` |
+| **401** | **once** (`util.MaxAuthRetries`) | covers a token that expired in flight. Further attempts re-send the same token, since `TokenProvider` cannot be told it was rejected |
 | other 4xx | no | permanent client errors, failed on the first attempt |
 
-The two 4xx entries are deliberate. Applying the usual "retry 5xx, fail fast on
-4xx" rule here means not surviving a database leader switchover.
+The two 4xx entries are deliberate: the usual "retry 5xx, fail fast on 4xx" rule
+does not survive a database leader switchover here.
 
-Retries live in this library only. The resty client built by
-`qubership-core-lib-go-maas-core` sets `SetRetryCount(0)` on purpose: resty
-retries whenever the round trip returns an error — exactly the connection-refused
-case a rescheduled agent produces — and leaving it enabled multiplied the two
-budgets into up to `RetryAttempts x (RetryCount+1)` TCP attempts.
-
-That client carries no timeout either, and deliberately so: it is shared with the
-topic watch, which long-polls for 60s, so any value short enough to bound a CRUD
-call would cut every legitimate poll short.
+Retries live in this library only. The resty client from
+`qubership-core-lib-go-maas-core` is built without its own retries and without a
+client-wide timeout — see its README for why.
 
 CRUD calls are bounded instead by `CrudClient.AttemptTimeout`
 (`util.DefaultAttemptTimeout`, 30s), applied per attempt, so a caller passing

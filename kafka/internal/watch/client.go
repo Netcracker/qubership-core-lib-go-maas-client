@@ -109,7 +109,7 @@ func (d *DefaultClient[T]) WatchOnCreateResources(ctx context.Context, keys clas
 					watchHolders = d.processWatchResponse(watchHolders, func(holders []*watchHolder[T]) (result []*watchHolder[T]) {
 						result = holders
 						if !response.IsSuccess() {
-							logger.Error("response with error code reveived. Status: %s, body: %s", response.Status(), response.String())
+							logger.Error("response with error code received. Status: %s, body: %s", response.Status(), response.String())
 							requestFailed = true
 							return
 						}
