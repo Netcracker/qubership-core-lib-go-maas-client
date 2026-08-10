@@ -94,7 +94,7 @@ type CrudClient struct {
 
 func (d *CrudClient) GetOrCreateTopic(ctx context.Context, keys classifier.Keys, options ...model.TopicCreateOptions) (*model.TopicAddress, error) {
 	var topicAddress *model.TopicAddress
-	err := util.NewRetry(d.RetryAttempts, d.RetryInterval).Run(func() error {
+	err := util.NewRetry(d.RetryAttempts, d.RetryInterval).RunCtx(ctx, func(ctx context.Context) error {
 		var opt model.TopicCreateOptions
 		if len(options) == 1 {
 			opt = options[0]
@@ -122,7 +122,7 @@ func (d *CrudClient) GetOrCreateTopic(ctx context.Context, keys classifier.Keys,
 		}
 		logger.InfoC(ctx, "Received response: %d", response.StatusCode())
 		if !response.IsSuccess() {
-			return fmt.Errorf("response with error code reveived. Status: %s, body: %s", response.Status(), response.String())
+			return util.ClassifyResponseError(response.StatusCode(), response.Status(), response.String())
 		}
 		var TopicResponse TopicResponse
 		body := response.Body()
@@ -141,7 +141,7 @@ func (d *CrudClient) GetOrCreateTopic(ctx context.Context, keys classifier.Keys,
 
 func (d *CrudClient) GetTopic(ctx context.Context, keys classifier.Keys) (*model.TopicAddress, error) {
 	var topicAddress *model.TopicAddress
-	err := util.NewRetry(d.RetryAttempts, d.RetryInterval).Run(func() error {
+	err := util.NewRetry(d.RetryAttempts, d.RetryInterval).RunCtx(ctx, func(ctx context.Context) error {
 		logger.InfoC(ctx, "Get topic by classifier %v", keys)
 		request := d.HttpClient.R().SetContext(ctx).SetBody(keys)
 		response, err := request.Post(d.MaasAgentUrl + "/api/v1/kafka/topic/get-by-classifier")
@@ -153,7 +153,7 @@ func (d *CrudClient) GetTopic(ctx context.Context, keys classifier.Keys) (*model
 			return nil
 		}
 		if !response.IsSuccess() {
-			return fmt.Errorf("response with error code reveived. Status: %s, body: %s", response.Status(), response.String())
+			return util.ClassifyResponseError(response.StatusCode(), response.Status(), response.String())
 		}
 		var TopicResponse TopicResponse
 		body := response.Body()
@@ -171,7 +171,7 @@ func (d *CrudClient) GetTopic(ctx context.Context, keys classifier.Keys) (*model
 }
 
 func (d *CrudClient) DeleteTopic(ctx context.Context, classifier classifier.Keys) error {
-	return util.NewRetry(d.RetryAttempts, d.RetryInterval).Run(func() error {
+	return util.NewRetry(d.RetryAttempts, d.RetryInterval).RunCtx(ctx, func(ctx context.Context) error {
 		body := TopicSearchRequest{Classifier: classifier}
 		logger.InfoC(ctx, "Get or Create topic by classifier %v", classifier)
 		request := d.HttpClient.R().SetContext(ctx).SetBody(body)
@@ -181,7 +181,7 @@ func (d *CrudClient) DeleteTopic(ctx context.Context, classifier classifier.Keys
 		}
 		logger.InfoC(ctx, "Received response: %d", response.StatusCode())
 		if !response.IsSuccess() {
-			return fmt.Errorf("response with error code reveived. Status: %s, body: %s", response.Status(), response.String())
+			return util.ClassifyResponseError(response.StatusCode(), response.Status(), response.String())
 		}
 		return nil
 	})

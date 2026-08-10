@@ -20,6 +20,7 @@ Go client to preform operations with MaaS
   * [Rabbit](#rabbit)
     * [MaaS Rabbit client API](#maas-rabbit-client-api)
     * [Create MaaS Rabbit go client with Cloud-Core default configuration](#create-maas-rabbit-go-client-with-cloud-core-default-configuration)
+  * [Retry behaviour](#retry-behaviour)
 <!-- TOC -->
 
 ## Kafka
@@ -57,3 +58,26 @@ MaaS Rabbit client to preform MaaS operations related to Rabbit
 To create MaaS rabbit go client with Cloud-Core defaults use the following library extension
 [libs/go/maas/core](https://github.com/netcracker/qubership-core-lib-go-maas-core)
 
+
+## Retry behaviour
+
+Every CRUD call to maas-agent (Kafka and Rabbit alike) is retried
+`util.DefaultRetryAttempts` times with `util.DefaultRetryInterval` between
+attempts. Retries stop early when the request context is done, so a caller
+deadline always wins over the retry budget.
+
+Which responses are retried:
+
+| Response | Retried | Why |
+|---|---|---|
+| 5xx | yes | includes the `500` maas-agent returns when it cannot reach maas-service at all |
+| 429 | yes | throttling |
+| **405** | **yes** | maas-service maps PostgreSQL error `25006` (READ ONLY SQL TRANSACTION) to `405`, so a write against a demoted Patroni node during a leader switchover arrives as `405`, not as `5xx` |
+| **401** | **yes** | the M2M token is re-fetched on every attempt, so an expired token or a briefly unavailable token provider clears itself on the next one |
+| other 4xx | no | permanent client errors, failed on the first attempt |
+
+The two 4xx entries are deliberate. Applying the usual "retry 5xx, fail fast on
+4xx" rule here means not surviving a database leader switchover.
+
+`GetTopic`/`GetVhost` keep treating `404` as "not found" and return `nil` after
+a single request.
