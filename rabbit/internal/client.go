@@ -68,6 +68,7 @@ func (d *CrudClient) retry() *util.Retry {
 
 func (d *CrudClient) GetOrCreateVhost(ctx context.Context, classifier classifier.Keys) (*model.Vhost, error) {
 	var result model.Vhost
+	respClassifier := util.NewResponseClassifier()
 	err := d.retry().RunCtx(ctx, func(ctx context.Context) error {
 		logger.InfoC(ctx, "Get or Create vhost by classifier %v", classifier)
 		request := d.HttpClient.R().SetContext(ctx).SetBody(classifier)
@@ -78,7 +79,7 @@ func (d *CrudClient) GetOrCreateVhost(ctx context.Context, classifier classifier
 		}
 		logger.InfoC(ctx, "Received response: %d", response.StatusCode())
 		if !response.IsSuccess() {
-			return util.ClassifyResponseError(response.StatusCode(), response.Status(), response.String())
+			return respClassifier.Classify(response.StatusCode(), response.Status(), response.String())
 		}
 		body := response.Body()
 		var vhost model.Vhost
@@ -98,6 +99,7 @@ func (d *CrudClient) GetOrCreateVhost(ctx context.Context, classifier classifier
 func (d *CrudClient) GetVhost(ctx context.Context, classifier classifier.Keys) (*model.VhostConfig, error) {
 	var result model.VhostConfig
 	var notFound bool
+	respClassifier := util.NewResponseClassifier()
 	err := d.retry().RunCtx(ctx, func(ctx context.Context) error {
 		logger.InfoC(ctx, "Get vhost by classifier %v", classifier)
 		request := d.HttpClient.R().SetContext(ctx).SetBody(classifier)
@@ -112,7 +114,7 @@ func (d *CrudClient) GetVhost(ctx context.Context, classifier classifier.Keys) (
 				notFound = true
 				return nil
 			}
-			return util.ClassifyResponseError(response.StatusCode(), response.Status(), response.String())
+			return respClassifier.Classify(response.StatusCode(), response.Status(), response.String())
 		}
 		body := response.Body()
 		var vhost model.VhostConfig

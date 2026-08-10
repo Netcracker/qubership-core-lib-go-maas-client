@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 )
 
@@ -79,8 +80,9 @@ func IsNonRetryable(err error) bool {
 //     StatusMethodNotAllowed, so a write against a demoted Patroni node during
 //     a leader switchover arrives here as 405, not as 5xx.
 //   - 401: the M2M token is re-fetched on every attempt (addAuthToken runs
-//     inside the retry closure), so an expired token or a briefly unavailable
-//     token provider resolves itself on the next attempt.
+//     inside the retry closure), so a token that expired in flight resolves
+//     itself on the next one. Budgeted separately and tightly - see
+//     MaxAuthRetries for why further attempts buy nothing.
 //
 // Keep the codes and their reasons together: both look obviously wrong to
 // anyone applying the usual "retry 5xx, fail fast on 4xx" rule, and will be
@@ -97,14 +99,47 @@ func IsRetryableStatus(statusCode int) bool {
 	}
 }
 
-// ClassifyResponseError turns a non-2xx maas-agent response into an error,
-// marking it non-retryable unless the status is retryable per
-// IsRetryableStatus.
+// MaxAuthRetries bounds how many times a single call retries a 401.
 //
-// Takes the response fields rather than a *resty.Response so this package
-// stays free of HTTP client dependencies.
-func ClassifyResponseError(statusCode int, status, body string) error {
+// One, because exactly one scenario benefits: the token was handed out with a
+// sliver of life left and expired in flight. On the next attempt the provider
+// sees it as expired and issues a fresh one.
+//
+// Nothing else does. Retrying cannot ask for a new token - TokenProvider has no
+// way of being told "this one was rejected" - it only calls GetToken again and
+// gets whatever is cached. So a token the provider still considers valid while
+// the server rejects it (wrong secret, key rotation, clock skew) comes back
+// identical on every further attempt. A provider that is itself unavailable does
+// not produce a 401 at all: GetToken returns an error, which is retried on its
+// own path with the full budget.
+var MaxAuthRetries = 1
+
+// ResponseClassifier turns non-2xx maas-agent responses into errors, marking
+// them non-retryable where retrying cannot help.
+//
+// It is stateful because 401 gets a tighter budget than the other retryable
+// statuses (see MaxAuthRetries), so one classifier must be created per call and
+// used for every attempt of that call.
+//
+// Takes the response fields rather than a *resty.Response so this package stays
+// free of HTTP client dependencies.
+type ResponseClassifier struct {
+	authAttempts int
+}
+
+func NewResponseClassifier() *ResponseClassifier {
+	return &ResponseClassifier{}
+}
+
+func (c *ResponseClassifier) Classify(statusCode int, status, body string) error {
 	err := fmt.Errorf("response with error code received. Status: %s, body: %s", status, body)
+	if statusCode == http.StatusUnauthorized {
+		c.authAttempts++
+		if c.authAttempts > MaxAuthRetries {
+			return MarkNonRetryable(err)
+		}
+		return err
+	}
 	if IsRetryableStatus(statusCode) {
 		return err
 	}

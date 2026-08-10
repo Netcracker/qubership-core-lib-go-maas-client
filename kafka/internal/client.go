@@ -95,6 +95,7 @@ type CrudClient struct {
 
 func (d *CrudClient) GetOrCreateTopic(ctx context.Context, keys classifier.Keys, options ...model.TopicCreateOptions) (*model.TopicAddress, error) {
 	var topicAddress *model.TopicAddress
+	respClassifier := util.NewResponseClassifier()
 	err := util.NewRetry(d.RetryAttempts, d.RetryInterval).RunCtx(ctx, func(ctx context.Context) error {
 		var opt model.TopicCreateOptions
 		if len(options) == 1 {
@@ -127,7 +128,7 @@ func (d *CrudClient) GetOrCreateTopic(ctx context.Context, keys classifier.Keys,
 		}
 		logger.InfoC(ctx, "Received response: %d", response.StatusCode())
 		if !response.IsSuccess() {
-			return util.ClassifyResponseError(response.StatusCode(), response.Status(), response.String())
+			return respClassifier.Classify(response.StatusCode(), response.Status(), response.String())
 		}
 		var TopicResponse TopicResponse
 		body := response.Body()
@@ -146,6 +147,7 @@ func (d *CrudClient) GetOrCreateTopic(ctx context.Context, keys classifier.Keys,
 
 func (d *CrudClient) GetTopic(ctx context.Context, keys classifier.Keys) (*model.TopicAddress, error) {
 	var topicAddress *model.TopicAddress
+	respClassifier := util.NewResponseClassifier()
 	err := util.NewRetry(d.RetryAttempts, d.RetryInterval).RunCtx(ctx, func(ctx context.Context) error {
 		logger.InfoC(ctx, "Get topic by classifier %v", keys)
 		request := d.HttpClient.R().SetContext(ctx).SetBody(keys)
@@ -162,7 +164,7 @@ func (d *CrudClient) GetTopic(ctx context.Context, keys classifier.Keys) (*model
 			return nil
 		}
 		if !response.IsSuccess() {
-			return util.ClassifyResponseError(response.StatusCode(), response.Status(), response.String())
+			return respClassifier.Classify(response.StatusCode(), response.Status(), response.String())
 		}
 		var TopicResponse TopicResponse
 		body := response.Body()
@@ -180,6 +182,7 @@ func (d *CrudClient) GetTopic(ctx context.Context, keys classifier.Keys) (*model
 }
 
 func (d *CrudClient) DeleteTopic(ctx context.Context, classifier classifier.Keys) error {
+	respClassifier := util.NewResponseClassifier()
 	return util.NewRetry(d.RetryAttempts, d.RetryInterval).RunCtx(ctx, func(ctx context.Context) error {
 		body := TopicSearchRequest{Classifier: classifier}
 		logger.InfoC(ctx, "Get or Create topic by classifier %v", classifier)
@@ -194,7 +197,7 @@ func (d *CrudClient) DeleteTopic(ctx context.Context, classifier classifier.Keys
 		}
 		logger.InfoC(ctx, "Received response: %d", response.StatusCode())
 		if !response.IsSuccess() {
-			return util.ClassifyResponseError(response.StatusCode(), response.Status(), response.String())
+			return respClassifier.Classify(response.StatusCode(), response.Status(), response.String())
 		}
 		return nil
 	})
