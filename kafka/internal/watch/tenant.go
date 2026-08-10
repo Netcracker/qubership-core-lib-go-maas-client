@@ -62,25 +62,30 @@ type TenantWatchBroadcaster[T Resource] struct {
 
 func (b *TenantWatchBroadcaster[T]) start() error {
 	logger.Info("Starting tenant watch broadcaster")
-	b.internalProcCtx, b.cancel = context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
+	b.lock.Lock()
+	b.internalProcCtx = ctx
+	b.cancel = cancel
+	b.lock.Unlock()
+
 	readyChan := make(chan error, 1)
-	go b.processLoop(b.internalProcCtx)
+	go b.processLoop(ctx)
 	go func() {
 		var err error
 		defer func() {
-			// if all retries were used, remove all clients from notification list
-			// and then stop ourselves so internalProcCtx is cancelled and every client gets notified and have a chance to handel it (re-connect or terminate)
-			// do it in separate go routine because it requires to use global lock which currently can be hold by the client's invocation of Watch()
+			// give up: clean up watchers and reset startOnce before letting the
+			// blocked Watch() call return, so a subsequent Watch() reliably
+			// starts a fresh connection instead of racing this cleanup.
+			b.removeAllWatchersAndStop()
 			select {
 			case readyChan <- err:
 			default:
 			}
-			b.removeAllWatchersAndStop()
 		}()
 		retries := 0
 		for {
 			select {
-			case <-b.internalProcCtx.Done():
+			case <-ctx.Done():
 				return
 			default:
 				onConnect := func() {
@@ -90,14 +95,14 @@ func (b *TenantWatchBroadcaster[T]) start() error {
 					default:
 					}
 				}
-				err = b.connectToWebSocket(b.internalProcCtx, b.tenantManagerUrl, b.dialer, b.authSupplier, onConnect)
+				err = b.connectToWebSocket(ctx, b.tenantManagerUrl, b.dialer, b.authSupplier, onConnect)
 				if err != nil {
 					if errors.Is(err, context.Canceled) || retries >= util.DefaultRetryAttempts {
 						return
 					}
 					retries++
 					duration := time.Duration(int32(retries)) * util.DefaultRetryInterval
-					logger.ErrorC(b.internalProcCtx, "failed to connect to tenant manager web socket due to: %v, \nretrying after %f seconds", err, duration.Seconds())
+					logger.ErrorC(ctx, "failed to connect to tenant manager web socket due to: %v, \nretrying after %f seconds", err, duration.Seconds())
 					time.Sleep(duration)
 					continue
 				}
@@ -117,13 +122,11 @@ func (b *TenantWatchBroadcaster[T]) stop() {
 	b.startOnce = &sync.Once{}
 }
 
+// Watch registers a callback and returns once the shared connection either
+// comes up or exhausts its retries. A nil return does not guarantee the
+// connection stays alive afterwards: a watcher attaching to a round that is
+// already giving up still receives the failure through its callback.
 func (b *TenantWatchBroadcaster[T]) Watch(ctx context.Context, classifierKey classifier.Keys, callback func([]T, error)) error {
-	b.lock.Lock()
-	defer func() {
-		b.watchCounter++
-		b.lock.Unlock()
-	}()
-
 	name := classifierKey[classifier.Name]
 	namespace := classifierKey[classifier.Namespace]
 	if name == "" || namespace == "" {
@@ -132,10 +135,14 @@ func (b *TenantWatchBroadcaster[T]) Watch(ctx context.Context, classifierKey cla
 	if _, present := classifierKey[classifier.TenantId]; present {
 		return fmt.Errorf("classifier cannot contain '%s' param", classifier.TenantId)
 	}
+
+	b.lock.Lock()
+	watchId := b.watchCounter
+	b.watchCounter++
 	userCtx, cancelUserCtx := context.WithCancel(ctx)
-	logger.InfoC(userCtx, "Starting watcher#%d with name=%s, namespace=%s", b.watchCounter, name, namespace)
+	logger.InfoC(userCtx, "Starting watcher#%d with name=%s, namespace=%s", watchId, name, namespace)
 	w := watcher[T]{
-		id:          b.watchCounter,
+		id:          watchId,
 		name:        name,
 		namespace:   namespace,
 		callback:    callback,
@@ -145,16 +152,31 @@ func (b *TenantWatchBroadcaster[T]) Watch(ctx context.Context, classifierKey cla
 		broadcaster: b,
 	}
 	b.watchers = append(b.watchers, &w)
+	// capture the current startOnce before releasing the lock: start() can
+	// block for a long time and must not be called while holding it.
+	startOnce := b.startOnce
+	b.lock.Unlock()
 
 	var err error
-	b.startOnce.Do(func() {
+	startOnce.Do(func() {
 		err = b.start()
 	})
+
+	// bind this watcher to whichever round's context is active now, instead
+	// of reading the broadcaster's mutable field later from another
+	// goroutine, which would race with a subsequent round replacing it.
+	b.lock.RLock()
+	w.procCtx = b.internalProcCtx
+	b.lock.RUnlock()
+
 	go w.run()
-	logger.InfoC(userCtx, "Started watcher#%d", b.watchCounter)
+	logger.InfoC(userCtx, "Started watcher#%d", watchId)
 	// re-enqueue tenants so broadcaster can re-sent tenants to the just added watcher
 	go func() {
-		b.tenants <- b.currentTenants
+		b.lock.RLock()
+		tenants := b.currentTenants
+		b.lock.RUnlock()
+		b.tenants <- tenants
 	}()
 	return err
 }
@@ -222,9 +244,9 @@ func (b *TenantWatchBroadcaster[T]) readEvents(ctx context.Context, subscription
 }
 
 func (b *TenantWatchBroadcaster[T]) removeAllWatchersAndStop() {
-	logger.InfoC(b.internalProcCtx, "Removing all watchers")
 	b.lock.Lock()
 	defer b.lock.Unlock()
+	logger.InfoC(b.internalProcCtx, "Removing all watchers")
 	b.watchers = nil
 	b.stop()
 }
@@ -360,6 +382,7 @@ type watcher[T Resource] struct {
 	queue               chan []T
 	broadcaster         *TenantWatchBroadcaster[T]
 	lastNotifiedTenants []watch.Tenant
+	procCtx             context.Context
 }
 
 func (w *watcher[T]) process(resources []T, err error) {
@@ -375,10 +398,10 @@ func (w *watcher[T]) process(resources []T, err error) {
 func (w *watcher[T]) run() {
 	for {
 		select {
-		case <-w.broadcaster.internalProcCtx.Done():
+		case <-w.procCtx.Done():
 			// internal watcher process was canceled, we need to stop and notify all clients
 			var empty []T
-			w.process(empty, w.broadcaster.internalProcCtx.Err())
+			w.process(empty, w.procCtx.Err())
 			return
 		case <-w.userCtx.Done():
 			w.broadcaster.removeWatcher(w)

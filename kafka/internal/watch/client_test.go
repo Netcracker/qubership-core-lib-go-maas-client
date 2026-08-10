@@ -289,17 +289,25 @@ func TestWatch_ValidClassifier_StartsBroadcasterAndTriggersCallback(t *testing.T
 		case <-timeout:
 			waited = true
 		case <-tick:
-			if called {
+			mu.Lock()
+			c := called
+			mu.Unlock()
+			if c {
 				waited = true
 				break
 			}
 		}
 	}
 
-	assert.True(t, called, "callback should be triggered")
-	require.Len(t, received, 1)
-	assert.Equal(t, "r1", received[0].classifier["name"])
-	assert.Equal(t, "ns", received[0].classifier["namespace"])
+	mu.Lock()
+	gotCalled := called
+	gotReceived := received
+	mu.Unlock()
+
+	assert.True(t, gotCalled, "callback should be triggered")
+	require.Len(t, gotReceived, 1)
+	assert.Equal(t, "r1", gotReceived[0].classifier["name"])
+	assert.Equal(t, "ns", gotReceived[0].classifier["namespace"])
 }
 
 func (b *TenantWatchBroadcaster[T]) NotifyForTest(tenants []watch.Tenant) {

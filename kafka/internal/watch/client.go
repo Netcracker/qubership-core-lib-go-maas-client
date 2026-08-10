@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/go-resty/resty/v2"
 	"github.com/netcracker/qubership-core-lib-go-maas-client/v3/classifier"
+	"github.com/netcracker/qubership-core-lib-go-maas-client/v3/util"
 	"github.com/netcracker/qubership-core-lib-go/v3/logging"
 )
 
@@ -28,10 +30,12 @@ type Client[T Resource] interface {
 func NewClient[T Resource](maasAgentUrl string, watchPath string,
 	httpClient *resty.Client, responseToResources func(response *resty.Response) ([]T, error)) *DefaultClient[T] {
 	return &DefaultClient[T]{
-		watchUrl:   maasAgentUrl + watchPath,
-		httpClient: httpClient,
-		converter:  responseToResources,
-		watchLock:  &sync.RWMutex{},
+		watchUrl:         maasAgentUrl + watchPath,
+		httpClient:       httpClient,
+		converter:        responseToResources,
+		watchLock:        &sync.RWMutex{},
+		RetryInterval:    util.DefaultRetryInterval,
+		MaxRetryInterval: util.DefaultMaxRetryInterval,
 	}
 }
 
@@ -41,6 +45,25 @@ type DefaultClient[T Resource] struct {
 	watchCancel func() []*watchHolder[T]
 	watchLock   *sync.RWMutex
 	converter   func(response *resty.Response) ([]T, error)
+
+	// RetryInterval and MaxRetryInterval control the linear, capped backoff
+	// applied between requests after a failed watch call.
+	RetryInterval    time.Duration
+	MaxRetryInterval time.Duration
+}
+
+// retryIntervals returns the configured backoff bounds, falling back to
+// util.Default* for a client built without NewClient.
+func (d *DefaultClient[T]) retryIntervals() (time.Duration, time.Duration) {
+	interval := d.RetryInterval
+	if interval <= 0 {
+		interval = util.DefaultRetryInterval
+	}
+	maxInterval := d.MaxRetryInterval
+	if maxInterval <= 0 {
+		maxInterval = util.DefaultMaxRetryInterval
+	}
+	return interval, maxInterval
 }
 
 func (d *DefaultClient[T]) WatchTenantResources(ctx context.Context, keys classifier.Keys, callback func([]T)) error {
@@ -62,6 +85,7 @@ func (d *DefaultClient[T]) WatchOnCreateResources(ctx context.Context, keys clas
 	go func(ctx context.Context, watchHolders []*watchHolder[T], watchersChan chan []*watchHolder[T]) {
 		// reset cancel func when we processed all classifiers
 		defer d.clearWatchCancel()
+		failures := 0
 		for len(watchHolders) > 0 {
 			var classifiers []classifier.Keys
 			for _, wHolder := range watchHolders {
@@ -73,24 +97,27 @@ func (d *DefaultClient[T]) WatchOnCreateResources(ctx context.Context, keys clas
 				watchersChan <- watchHolders
 				return
 			default:
+				requestFailed := false
 				response, err := d.httpClient.R().SetContext(ctx).SetBody(classifiers).Post(d.watchUrl)
 				if err != nil {
 					if errors.Is(err, context.Canceled) {
 						watchersChan <- watchHolders
 						return
-					} else {
-						logger.Error("failed to send request to maas-agent. Cause: %+v", err)
 					}
+					logger.Error("failed to send request to maas-agent. Cause: %+v", err)
+					requestFailed = true
 				} else {
 					watchHolders = d.processWatchResponse(watchHolders, func(holders []*watchHolder[T]) (result []*watchHolder[T]) {
 						result = holders
 						if !response.IsSuccess() {
 							logger.Error("response with error code reveived. Status: %s, body: %s", response.Status(), response.String())
+							requestFailed = true
 							return
 						}
 						resources, cErr := d.converter(response)
 						if cErr != nil {
 							logger.Error("failed to convert response. Cause: %+v", cErr)
+							requestFailed = true
 							return
 						}
 						for _, resource := range resources {
@@ -110,6 +137,23 @@ func (d *DefaultClient[T]) WatchOnCreateResources(ctx context.Context, keys clas
 						}
 						return
 					})
+				}
+
+				if !requestFailed {
+					failures = 0
+					continue
+				}
+				failures++
+				retryInterval, maxRetryInterval := d.retryIntervals()
+				backoff := time.Duration(failures) * retryInterval
+				if backoff > maxRetryInterval {
+					backoff = maxRetryInterval
+				}
+				select {
+				case <-ctx.Done():
+					watchersChan <- watchHolders
+					return
+				case <-time.After(backoff):
 				}
 			}
 		}
