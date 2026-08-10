@@ -2,13 +2,16 @@ package internal
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/go-resty/resty/v2"
 	"github.com/netcracker/qubership-core-lib-go-maas-client/v3/classifier"
+	"github.com/netcracker/qubership-core-lib-go-maas-client/v3/util"
 	"github.com/stretchr/testify/require"
 )
 
@@ -116,25 +119,27 @@ func Test_Failover_ResponseTable(t *testing.T) {
 			expectedRequests: 1,
 		},
 		{
-			// The M2M token is re-fetched on every attempt, so a 401 caused by
-			// an expired token or a briefly unavailable token provider must be
-			// retried rather than treated as a permanent auth failure.
-			name: "expired M2M token: 401 twice then success",
+			// The M2M token is re-fetched on every attempt, so a token that expired
+			// in flight clears on the next one - the single case a 401 retry exists for.
+			name: "token expired in flight: 401 then success",
 			steps: []stepBehavior{
-				{status: http.StatusUnauthorized, body: `{"error":"unauthorized"}`},
 				{status: http.StatusUnauthorized, body: `{"error":"unauthorized"}`},
 				{status: http.StatusOK, body: successBody},
 			},
 			expectSuccess:    true,
-			expectedRequests: 3,
+			expectedRequests: 2,
 		},
 		{
-			name: "401 that never clears fails after the retry budget",
+			// A 401 that keeps coming back means the provider is handing out a token
+			// the server rejects, and it has no way of being told so. Further attempts
+			// resend the same token, so the budget is deliberately tighter than the
+			// generic one: 1 + MaxAuthRetries, not the full RetryAttempts of 5.
+			name: "rejected credentials: 401 gives up after MaxAuthRetries, not the full budget",
 			steps: []stepBehavior{
 				{status: http.StatusUnauthorized, body: `{"error":"unauthorized"}`},
 			},
 			expectSuccess:    false,
-			expectedRequests: 5,
+			expectedRequests: util.MaxAuthRetries + 1,
 		},
 		{
 			name: "403 fails immediately, is not retried",
@@ -183,24 +188,45 @@ func Test_Failover_GetTopic_404NotRetried(t *testing.T) {
 	assertions.Equal(1, requestCount, "404 must not be retried")
 }
 
-// Test_Failover_RetryBudgetNotMultipliedByRestyRetry checks that retries
-// aren't multiplied when the underlying HTTP client has its own retry
-// configured on top of ours: with RetryAttempts=3, the server must see
-// exactly 3 requests.
+// Test_Failover_RetryBudgetNotMultipliedByRestyRetry checks that our retry
+// budget is not multiplied by a retry configured on the underlying HTTP client.
+//
+// The fault has to be a transport error, not a 5xx: resty retries when the
+// round trip returns an error, and a 5xx response is a successful round trip, so
+// it is left alone unless an explicit RetryCondition is registered. Testing this
+// with a 5xx would assert something that holds regardless of SetRetryCount and
+// would miss the case that actually multiplies - a rescheduled maas-agent
+// refusing connections.
+//
+// Counting happens at the listener rather than in a handler, because a refused
+// connection never reaches one.
 func Test_Failover_RetryBudgetNotMultipliedByRestyRetry(t *testing.T) {
 	assertions := require.New(t)
-	requestCount := 0
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestCount++
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{"error":"error proxying request: maas-service unavailable"}`))
-	}))
-	defer ts.Close()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	assertions.NoError(err)
+	agentUrl := "http://" + listener.Addr().String()
+
+	var connections int32
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, aErr := listener.Accept()
+			if aErr != nil {
+				return
+			}
+			atomic.AddInt32(&connections, 1)
+			// Close without answering: the same shape as an agent whose pod is going
+			// away mid-request, and a transport error for resty.
+			_ = conn.Close()
+		}
+	}()
 
 	httpClient := resty.New().SetRetryCount(10)
 
 	client := &CrudClient{
-		MaasAgentUrl:  ts.URL,
+		MaasAgentUrl:  agentUrl,
 		Namespace:     testNamespace,
 		HttpClient:    httpClient,
 		Auth:          func(ctx context.Context) (string, error) { return testToken, nil },
@@ -208,9 +234,14 @@ func Test_Failover_RetryBudgetNotMultipliedByRestyRetry(t *testing.T) {
 		RetryInterval: 5 * time.Millisecond,
 	}
 
-	_, err := client.GetOrCreateTopic(context.Background(), classifier.New("test"))
+	_, err = client.GetOrCreateTopic(context.Background(), classifier.New("test"))
 	assertions.Error(err)
-	assertions.Equal(3, requestCount, "retries got multiplied instead of staying at the configured budget")
+
+	_ = listener.Close()
+	<-done
+
+	assertions.Equal(int32(3), atomic.LoadInt32(&connections),
+		"resty retried on top of our budget: expected 3 attempts, the client made more")
 }
 
 // Test_Failover_ContextCancellation checks that a short context deadline

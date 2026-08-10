@@ -73,11 +73,17 @@ Which responses are retried:
 | 5xx | yes | includes the `500` maas-agent returns when it cannot reach maas-service at all |
 | 429 | yes | throttling |
 | **405** | **yes** | maas-service maps PostgreSQL error `25006` (READ ONLY SQL TRANSACTION) to `405`, so a write against a demoted Patroni node during a leader switchover arrives as `405`, not as `5xx` |
-| **401** | **yes** | the M2M token is re-fetched on every attempt, so an expired token or a briefly unavailable token provider clears itself on the next one |
+| **401** | **once** (`util.MaxAuthRetries`) | covers exactly one case: a token handed out with a sliver of life left that expired in flight, which the next attempt re-fetches. Nothing else — retrying cannot ask `TokenProvider` for a new token, only for whatever is cached, so a rejected token comes back identical. A provider that is itself unavailable returns an error instead of a 401 and is retried on its own path |
 | other 4xx | no | permanent client errors, failed on the first attempt |
 
 The two 4xx entries are deliberate. Applying the usual "retry 5xx, fail fast on
 4xx" rule here means not surviving a database leader switchover.
+
+Retries live in this library only. The resty client built by
+`qubership-core-lib-go-maas-core` sets `SetRetryCount(0)` on purpose: resty
+retries whenever the round trip returns an error — exactly the connection-refused
+case a rescheduled agent produces — and leaving it enabled multiplied the two
+budgets into up to `RetryAttempts x (RetryCount+1)` TCP attempts.
 
 `GetTopic`/`GetVhost` keep treating `404` as "not found" and return `nil` after
 a single request.

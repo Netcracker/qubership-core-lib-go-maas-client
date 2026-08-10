@@ -172,12 +172,14 @@ func (b *TenantWatchBroadcaster[T]) Watch(ctx context.Context, classifierKey cla
 	go w.run()
 	logger.InfoC(userCtx, "Started watcher#%d", watchId)
 	// re-enqueue tenants so broadcaster can re-sent tenants to the just added watcher
-	go func() {
-		b.lock.RLock()
-		tenants := b.currentTenants
-		b.lock.RUnlock()
-		b.tenants <- tenants
-	}()
+	go func(procCtx context.Context, tenants []watch.Tenant) {
+		select {
+		case b.tenants <- tenants:
+		case <-procCtx.Done():
+			// round ended before delivery; the next round rebuilds the list from its
+			// own SUBSCRIBED event, so dropping this one is correct
+		}
+	}(w.procCtx, b.snapshotTenants())
 	return err
 }
 
@@ -236,8 +238,15 @@ func (b *TenantWatchBroadcaster[T]) readEvents(ctx context.Context, subscription
 			// merge received tenants with current ones
 			changed := b.mergeTenants(&event)
 			if changed {
-				logger.InfoC(ctx, "Broadcasting updated active tenant list: %v", b.currentTenants)
-				b.tenants <- b.currentTenants
+				tenants := b.snapshotTenants()
+				logger.InfoC(ctx, "Broadcasting updated active tenant list: %v", tenants)
+				// b.tenants is unbuffered and processLoop is the only reader, so a
+				// plain send blocks forever once this round is cancelled.
+				select {
+				case b.tenants <- tenants:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
 			}
 		}
 	}
@@ -299,7 +308,23 @@ func (b *TenantWatchBroadcaster[T]) notifyWatchers(tenants []watch.Tenant) {
 	}
 }
 
+// mergeTenants updates currentTenants under the write lock. Every write to
+// currentTenants must go through here: readers take the read lock, and a
+// half-locked field is worse than an unlocked one because it reads as safe.
 func (b *TenantWatchBroadcaster[T]) mergeTenants(event *watch.TenantWatchEvent) bool {
+	b.lock.Lock()
+	defer b.lock.Unlock()
+	return b.mergeTenantsLocked(event)
+}
+
+// snapshotTenants returns the current list for handing to another goroutine.
+func (b *TenantWatchBroadcaster[T]) snapshotTenants() []watch.Tenant {
+	b.lock.RLock()
+	defer b.lock.RUnlock()
+	return b.currentTenants
+}
+
+func (b *TenantWatchBroadcaster[T]) mergeTenantsLocked(event *watch.TenantWatchEvent) bool {
 	switch event.Type {
 	case watch.SUBSCRIBED:
 		logger.Info("Subscription event received. Tenants: %v", event.Tenants)
