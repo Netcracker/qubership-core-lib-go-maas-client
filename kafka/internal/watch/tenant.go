@@ -27,7 +27,6 @@ func NewTenantWatchClient[T Resource](tenantManagerUrl string,
 	tenantWatchBroadcaster := &TenantWatchBroadcaster[T]{
 		watchers:         []*watcher[T]{},
 		tenants:          make(chan []watch.Tenant),
-		lock:             &sync.RWMutex{},
 		startOnce:        &sync.Once{},
 		getResources:     getResources,
 		tenantManagerUrl: tenantManagerUrl,
@@ -49,7 +48,8 @@ type TenantWatchBroadcaster[T Resource] struct {
 	internalProcCtx    context.Context
 	currentTenants     []watch.Tenant
 	tenants            chan []watch.Tenant
-	lock               *sync.RWMutex
+	// By value so the zero value is usable: never copy the struct.
+	lock               sync.RWMutex
 	cancel             context.CancelFunc
 	startOnce          *sync.Once
 	getResources       func(ctx context.Context, keys classifier.Keys, tenants []watch.Tenant) ([]T, error)
@@ -73,9 +73,8 @@ func (b *TenantWatchBroadcaster[T]) start() error {
 	go func() {
 		var err error
 		defer func() {
-			// give up: clean up watchers and reset startOnce before letting the
-			// blocked Watch() call return, so a subsequent Watch() reliably
-			// starts a fresh connection instead of racing this cleanup.
+			// clean up before releasing the blocked Watch(), so the next Watch()
+			// starts a fresh connection instead of racing this cleanup
 			b.removeAllWatchersAndStop()
 			select {
 			case readyChan <- err:
@@ -122,10 +121,9 @@ func (b *TenantWatchBroadcaster[T]) stop() {
 	b.startOnce = &sync.Once{}
 }
 
-// Watch registers a callback and returns once the shared connection either
-// comes up or exhausts its retries. A nil return does not guarantee the
-// connection stays alive afterwards: a watcher attaching to a round that is
-// already giving up still receives the failure through its callback.
+// Watch registers a callback and returns once the shared connection comes up or
+// exhausts its retries. A nil return does not guarantee the connection stays
+// alive; failures afterwards arrive through the callback.
 func (b *TenantWatchBroadcaster[T]) Watch(ctx context.Context, classifierKey classifier.Keys, callback func([]T, error)) error {
 	name := classifierKey[classifier.Name]
 	namespace := classifierKey[classifier.Namespace]
@@ -152,8 +150,7 @@ func (b *TenantWatchBroadcaster[T]) Watch(ctx context.Context, classifierKey cla
 		broadcaster: b,
 	}
 	b.watchers = append(b.watchers, &w)
-	// capture the current startOnce before releasing the lock: start() can
-	// block for a long time and must not be called while holding it.
+	// capture startOnce before unlocking: start() blocks and must not hold the lock
 	startOnce := b.startOnce
 	b.lock.Unlock()
 
@@ -162,22 +159,21 @@ func (b *TenantWatchBroadcaster[T]) Watch(ctx context.Context, classifierKey cla
 		err = b.start()
 	})
 
-	// bind this watcher to whichever round's context is active now, instead
-	// of reading the broadcaster's mutable field later from another
-	// goroutine, which would race with a subsequent round replacing it.
+	// bind the watcher to the round active now, so a later round replacing the
+	// field cannot race with it
 	b.lock.RLock()
 	w.procCtx = b.internalProcCtx
 	b.lock.RUnlock()
 
 	go w.run()
 	logger.InfoC(userCtx, "Started watcher#%d", watchId)
-	// re-enqueue tenants so broadcaster can re-sent tenants to the just added watcher
+	// re-enqueue tenants so broadcaster can re-sent tenants to the just added watcher.
+	// Bound to the round: b.tenants is unbuffered, so an unguarded send would outlive
+	// a round that is giving up and leak into the next one.
 	go func(procCtx context.Context, tenants []watch.Tenant) {
 		select {
 		case b.tenants <- tenants:
 		case <-procCtx.Done():
-			// round ended before delivery; the next round rebuilds the list from its
-			// own SUBSCRIBED event, so dropping this one is correct
 		}
 	}(w.procCtx, b.snapshotTenants())
 	return err
@@ -240,8 +236,7 @@ func (b *TenantWatchBroadcaster[T]) readEvents(ctx context.Context, subscription
 			if changed {
 				tenants := b.snapshotTenants()
 				logger.InfoC(ctx, "Broadcasting updated active tenant list: %v", tenants)
-				// b.tenants is unbuffered and processLoop is the only reader, so a
-				// plain send blocks forever once this round is cancelled.
+				// unbuffered: a plain send would block forever once the round is cancelled
 				select {
 				case b.tenants <- tenants:
 				case <-ctx.Done():
@@ -308,16 +303,16 @@ func (b *TenantWatchBroadcaster[T]) notifyWatchers(tenants []watch.Tenant) {
 	}
 }
 
-// mergeTenants updates currentTenants under the write lock. Every write to
-// currentTenants must go through here: readers take the read lock, and a
-// half-locked field is worse than an unlocked one because it reads as safe.
+// mergeTenants applies the event to currentTenants. All writes go through here,
+// under the write lock.
 func (b *TenantWatchBroadcaster[T]) mergeTenants(event *watch.TenantWatchEvent) bool {
 	b.lock.Lock()
 	defer b.lock.Unlock()
 	return b.mergeTenantsLocked(event)
 }
 
-// snapshotTenants returns the current list for handing to another goroutine.
+// snapshotTenants returns the current list for another goroutine. The slice is
+// safe to share: mergeTenantsLocked replaces it rather than mutating in place.
 func (b *TenantWatchBroadcaster[T]) snapshotTenants() []watch.Tenant {
 	b.lock.RLock()
 	defer b.lock.RUnlock()

@@ -16,12 +16,13 @@ import (
 func NewClient(namespace string, maasAgentUrl string, tenantManagerUrl string, httpClient *resty.Client,
 	dialer *websocket.Dialer, authSupplier func(ctx context.Context) (string, error)) MaasClient {
 	crudClient := &internal.CrudClient{
-		MaasAgentUrl:  maasAgentUrl,
-		Namespace:     namespace,
-		HttpClient:    httpClient,
-		Auth:          authSupplier,
-		RetryInterval: util.DefaultRetryInterval,
-		RetryAttempts: util.DefaultRetryAttempts,
+		MaasAgentUrl:   maasAgentUrl,
+		Namespace:      namespace,
+		HttpClient:     httpClient,
+		Auth:           authSupplier,
+		RetryInterval:  util.DefaultRetryInterval,
+		RetryAttempts:  util.DefaultRetryAttempts,
+		AttemptTimeout: util.DefaultAttemptTimeout,
 	}
 	watchClient := watchInternal.NewClient[model.TopicAddress](maasAgentUrl,
 		"/api/v2/kafka/topic/watch-create?timeout=60s", httpClient, internal.ResponseToTopicAddress)

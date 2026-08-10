@@ -8,11 +8,12 @@ import (
 
 func NewClient(namespace string, maasAgentUrl string, httpClient *resty.Client) MaasClient {
 	client := &internal.CrudClient{
-		MaasAgentUrl:  maasAgentUrl,
-		Namespace:     namespace,
-		HttpClient:    httpClient,
-		RetryAttempts: util.DefaultRetryAttempts,
-		RetryInterval: util.DefaultRetryInterval,
+		MaasAgentUrl:   maasAgentUrl,
+		Namespace:      namespace,
+		HttpClient:     httpClient,
+		RetryAttempts:  util.DefaultRetryAttempts,
+		RetryInterval:  util.DefaultRetryInterval,
+		AttemptTimeout: util.DefaultAttemptTimeout,
 	}
 
 	return internal.NewRabbitClient(namespace, client)

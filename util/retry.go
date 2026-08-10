@@ -11,16 +11,23 @@ import (
 var (
 	DefaultRetryAttempts = 30
 	DefaultRetryInterval = time.Second
-	// DefaultMaxRetryInterval caps growing backoff strategies built on top of
-	// DefaultRetryInterval, so a long outage cannot stretch the delay without bound.
+	// DefaultMaxRetryInterval caps growing backoff strategies.
 	DefaultMaxRetryInterval = 30 * time.Second
+	// DefaultAttemptTimeout bounds a single request, see AttemptContext.
+	DefaultAttemptTimeout = 30 * time.Second
 )
 
+// AttemptContext derives the context for one attempt, so that a caller passing
+// context.Background() is still bounded. A shorter caller deadline wins.
+func AttemptContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		timeout = DefaultAttemptTimeout
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
 // Retry runs a task with a bounded number of attempts.
-//
-// Non-positive Attempts or Interval fall back to the package defaults: a zero
-// value must never degrade into "make no attempt at all", which would silently
-// skip the request instead of performing it once.
+// Non-positive Attempts or Interval fall back to the package defaults.
 type Retry struct {
 	Attempts int
 	Interval time.Duration
@@ -30,7 +37,7 @@ func NewRetry(attempts int, interval time.Duration) *Retry {
 	return &Retry{Attempts: attempts, Interval: interval}
 }
 
-// AttemptsOrDefault reports the effective attempt count, see Retry.
+// AttemptsOrDefault reports the effective attempt count.
 func (r *Retry) AttemptsOrDefault() int {
 	if r.Attempts <= 0 {
 		return DefaultRetryAttempts
@@ -38,7 +45,7 @@ func (r *Retry) AttemptsOrDefault() int {
 	return r.Attempts
 }
 
-// IntervalOrDefault reports the effective interval, see Retry.
+// IntervalOrDefault reports the effective interval.
 func (r *Retry) IntervalOrDefault() time.Duration {
 	if r.Interval <= 0 {
 		return DefaultRetryInterval
@@ -70,23 +77,11 @@ func IsNonRetryable(err error) bool {
 	return errors.As(err, &nre)
 }
 
-// IsRetryableStatus reports whether an HTTP status code from maas-agent
-// should be retried.
+// IsRetryableStatus reports whether a maas-agent status code should be retried.
 //
-// Two 4xx codes are deliberately included. Both are transient in this specific
-// chain rather than permanent client errors:
-//
-//   - 405: maas-service maps PG error 25006 (READ ONLY SQL TRANSACTION) to
-//     StatusMethodNotAllowed, so a write against a demoted Patroni node during
-//     a leader switchover arrives here as 405, not as 5xx.
-//   - 401: the M2M token is re-fetched on every attempt (addAuthToken runs
-//     inside the retry closure), so a token that expired in flight resolves
-//     itself on the next one. Budgeted separately and tightly - see
-//     MaxAuthRetries for why further attempts buy nothing.
-//
-// Keep the codes and their reasons together: both look obviously wrong to
-// anyone applying the usual "retry 5xx, fail fast on 4xx" rule, and will be
-// removed as dead weight if the reasons are not right here.
+// Two 4xx are transient here rather than permanent: 405 is how maas-service
+// reports a read-only Postgres during a leader switchover, and 401 clears when
+// the token is re-fetched on the next attempt.
 func IsRetryableStatus(statusCode int) bool {
 	if statusCode >= 500 {
 		return true
@@ -101,28 +96,15 @@ func IsRetryableStatus(statusCode int) bool {
 
 // MaxAuthRetries bounds how many times a single call retries a 401.
 //
-// One, because exactly one scenario benefits: the token was handed out with a
-// sliver of life left and expired in flight. On the next attempt the provider
-// sees it as expired and issues a fresh one.
-//
-// Nothing else does. Retrying cannot ask for a new token - TokenProvider has no
-// way of being told "this one was rejected" - it only calls GetToken again and
-// gets whatever is cached. So a token the provider still considers valid while
-// the server rejects it (wrong secret, key rotation, clock skew) comes back
-// identical on every further attempt. A provider that is itself unavailable does
-// not produce a 401 at all: GetToken returns an error, which is retried on its
-// own path with the full budget.
+// One is enough: it covers a token that expired in flight. A token the provider
+// still considers valid but the server rejects comes back identical on every
+// further attempt, since TokenProvider cannot be told it was rejected.
 var MaxAuthRetries = 1
 
 // ResponseClassifier turns non-2xx maas-agent responses into errors, marking
 // them non-retryable where retrying cannot help.
 //
-// It is stateful because 401 gets a tighter budget than the other retryable
-// statuses (see MaxAuthRetries), so one classifier must be created per call and
-// used for every attempt of that call.
-//
-// Takes the response fields rather than a *resty.Response so this package stays
-// free of HTTP client dependencies.
+// Stateful because 401 has its own budget, so create one per call.
 type ResponseClassifier struct {
 	authAttempts int
 }
@@ -189,8 +171,8 @@ func (r *Retry) RunCtx(ctx context.Context, task func(ctx context.Context) error
 	return fmt.Errorf("failed after %d retries: %w", attempts, err)
 }
 
-// ctxDoneErr keeps both causes in the chain: callers may match either the
-// context cause (deadline/cancellation) or the last transport/status error.
+// ctxDoneErr builds the abort error, keeping both the context cause and the
+// last attempt error matchable via errors.Is.
 func ctxDoneErr(attemptsMade, attemptsTotal int, ctxErr, lastErr error) error {
 	if lastErr == nil {
 		return fmt.Errorf("retry aborted before first attempt (%d/%d): %w", attemptsMade, attemptsTotal, ctxErr)

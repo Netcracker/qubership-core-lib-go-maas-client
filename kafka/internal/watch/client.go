@@ -46,14 +46,13 @@ type DefaultClient[T Resource] struct {
 	watchLock   *sync.RWMutex
 	converter   func(response *resty.Response) ([]T, error)
 
-	// RetryInterval and MaxRetryInterval control the linear, capped backoff
-	// applied between requests after a failed watch call.
+	// Linear, capped backoff between failed watch requests.
 	RetryInterval    time.Duration
 	MaxRetryInterval time.Duration
 }
 
-// retryIntervals returns the configured backoff bounds, falling back to
-// util.Default* for a client built without NewClient.
+// retryIntervals returns the backoff bounds, falling back to util.Default* when
+// the client was built without NewClient.
 func (d *DefaultClient[T]) retryIntervals() (time.Duration, time.Duration) {
 	interval := d.RetryInterval
 	if interval <= 0 {
