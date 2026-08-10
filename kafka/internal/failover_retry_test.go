@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -236,21 +237,27 @@ func Test_Failover_UnresponsiveAgentIsBoundedWithoutCallerDeadline(t *testing.T)
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	assertions.NoError(err)
-	defer listener.Close()
 
-	held := make(chan net.Conn, 8)
+	var mu sync.Mutex
+	var held []net.Conn
 	go func() {
 		for {
 			conn, aErr := listener.Accept()
 			if aErr != nil {
-				close(held)
 				return
 			}
-			held <- conn // accepted and never answered
+			mu.Lock()
+			held = append(held, conn) // accepted and never answered
+			mu.Unlock()
 		}
 	}()
+	// one defer, so the listener is closed - releasing the accept loop - before
+	// the accepted connections are
 	defer func() {
-		for conn := range held {
+		_ = listener.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, conn := range held {
 			_ = conn.Close()
 		}
 	}()
