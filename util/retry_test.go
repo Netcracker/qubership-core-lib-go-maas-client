@@ -60,8 +60,8 @@ func Test_ResponseClassifier_RetryableStatuses(t *testing.T) {
 	}
 }
 
-// 401 has its own budget, so the classifier must count them within one call.
-func Test_ResponseClassifier_AuthBudgetIsTighter(t *testing.T) {
+// 401 has its own attempt limit, so the classifier must count them within one call.
+func Test_ResponseClassifier_AuthRetriesAreCappedTighter(t *testing.T) {
 	assertions := require.New(t)
 
 	c := NewResponseClassifier()
@@ -72,7 +72,7 @@ func Test_ResponseClassifier_AuthBudgetIsTighter(t *testing.T) {
 	assertions.True(IsNonRetryable(c.Classify(401, "status", "body")),
 		"401 must stop being retryable once MaxAuthRetries is used up")
 
-	// The 401 budget must not eat into the generic one.
+	// The 401 cap must not eat into the generic attempts.
 	assertions.False(IsNonRetryable(c.Classify(500, "status", "body")),
 		"a 5xx after exhausted auth retries must still be retryable")
 

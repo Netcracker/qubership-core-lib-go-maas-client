@@ -284,6 +284,9 @@ func (b *TenantWatchBroadcaster[T]) processLoop(ctx context.Context) {
 }
 
 // notifyWatchers fetches resources per watcher and hands them to its queue.
+//
+// Called only from processLoop, so at most one notify is in flight; the
+// alreadyNotified check and the setNotified that follows it rely on that.
 func (b *TenantWatchBroadcaster[T]) notifyWatchers(ctx context.Context, tenants []watch.Tenant) {
 	b.lock.RLock()
 	watchers := make([]*watcher[T], len(b.watchers))
@@ -295,8 +298,20 @@ func (b *TenantWatchBroadcaster[T]) notifyWatchers(ctx context.Context, tenants 
 			continue
 		}
 		keys := classifier.New(w.name).WithNamespace(w.namespace)
-		resources, err := b.getResources(w.userCtx, keys, tenants)
+		// bound the fetch by both contexts, so cancelling the round does not wait
+		// out an in-flight request
+		fetchCtx, cancelFetch := mergeCancel(w.userCtx, ctx)
+		resources, err := b.getResources(fetchCtx, keys, tenants)
+		cancelFetch()
 		if err != nil {
+			// a cancelled context is the round or the watcher ending, not a failure
+			// of this watcher: stopping it here would drop a healthy subscription
+			if ctx.Err() != nil {
+				return
+			}
+			if w.userCtx.Err() != nil {
+				continue
+			}
 			logger.ErrorC(ctx, "Failed to get resources: %s", err.Error())
 			w.stop()
 			continue
@@ -312,6 +327,17 @@ func (b *TenantWatchBroadcaster[T]) notifyWatchers(ctx context.Context, tenants 
 		case <-ctx.Done():
 			return
 		}
+	}
+}
+
+// mergeCancel returns a context cancelled when either parent is cancelled.
+// The returned cancel must be called to release the watcher it installs.
+func mergeCancel(primary, other context.Context) (context.Context, context.CancelFunc) {
+	merged, cancel := context.WithCancel(primary)
+	stop := context.AfterFunc(other, cancel)
+	return merged, func() {
+		stop()
+		cancel()
 	}
 }
 
