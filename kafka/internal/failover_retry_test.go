@@ -25,15 +25,14 @@ type stepBehavior struct {
 
 // newSequencedServer plays back steps in order for requests to path,
 // repeating the last one once exhausted. *requestCount counts matching
-// requests.
-func newSequencedServer(path string, steps []stepBehavior, requestCount *int) *httptest.Server {
+// requests; it is atomic because each request is served on its own goroutine.
+func newSequencedServer(path string, steps []stepBehavior, requestCount *int64) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != path {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		idx := *requestCount
-		*requestCount++
+		idx := int(atomic.AddInt64(requestCount, 1) - 1)
 		var step stepBehavior
 		if idx < len(steps) {
 			step = steps[idx]
@@ -128,8 +127,8 @@ func Test_Failover_ResponseTable(t *testing.T) {
 			expectedRequests: 2,
 		},
 		{
-			// tighter than the generic budget: 1 + MaxAuthRetries, not RetryAttempts
-			name: "rejected credentials: 401 gives up after MaxAuthRetries, not the full budget",
+			// tighter than the generic limit: 1 + MaxAuthRetries, not RetryAttempts
+			name: "rejected credentials: 401 gives up after MaxAuthRetries, not all attempts",
 			steps: []stepBehavior{
 				{status: http.StatusUnauthorized, body: `{"error":"unauthorized"}`},
 			},
@@ -149,7 +148,7 @@ func Test_Failover_ResponseTable(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			assertions := require.New(t)
-			requestCount := 0
+			var requestCount int64
 			ts := newSequencedServer("/api/v1/kafka/topic", tc.steps, &requestCount)
 			defer ts.Close()
 
@@ -161,7 +160,8 @@ func Test_Failover_ResponseTable(t *testing.T) {
 			} else {
 				assertions.Error(err)
 			}
-			assertions.Equal(tc.expectedRequests, requestCount, "unexpected number of requests reaching maas-agent")
+			assertions.Equal(tc.expectedRequests, int(atomic.LoadInt64(&requestCount)),
+				"unexpected number of requests reaching maas-agent")
 		})
 	}
 }
@@ -170,7 +170,7 @@ func Test_Failover_ResponseTable(t *testing.T) {
 // after exactly one request.
 func Test_Failover_GetTopic_404NotRetried(t *testing.T) {
 	assertions := require.New(t)
-	requestCount := 0
+	var requestCount int64
 	ts := newSequencedServer("/api/v1/kafka/topic/get-by-classifier",
 		[]stepBehavior{{status: http.StatusNotFound}}, &requestCount)
 	defer ts.Close()
@@ -180,14 +180,14 @@ func Test_Failover_GetTopic_404NotRetried(t *testing.T) {
 	topic, err := client.GetTopic(context.Background(), classifier.New("test"))
 	assertions.NoError(err)
 	assertions.Nil(topic)
-	assertions.Equal(1, requestCount, "404 must not be retried")
+	assertions.Equal(int64(1), atomic.LoadInt64(&requestCount), "404 must not be retried")
 }
 
-// Test_Failover_TransportErrorSpendsExactlyTheConfiguredBudget pins the attempt
+// Test_Failover_TransportErrorMakesExactlyTheConfiguredAttempts pins the attempt
 // count on the transport-error path - a maas-agent pod going away mid-request.
 // Counting happens at the listener because a dropped connection never reaches a
 // handler.
-func Test_Failover_TransportErrorSpendsExactlyTheConfiguredBudget(t *testing.T) {
+func Test_Failover_TransportErrorMakesExactlyTheConfiguredAttempts(t *testing.T) {
 	assertions := require.New(t)
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -282,7 +282,7 @@ func Test_Failover_UnresponsiveAgentIsBoundedWithoutCallerDeadline(t *testing.T)
 }
 
 // Test_Failover_ContextCancellation checks that a short context deadline
-// aborts retries promptly instead of waiting out the full retry budget.
+// aborts retries promptly instead of waiting out every remaining attempt.
 func Test_Failover_ContextCancellation(t *testing.T) {
 	assertions := require.New(t)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,11 +17,11 @@ import (
 // retried and eventually succeeds.
 func Test_Failover_GetOrCreateVhost_RetriesOn500(t *testing.T) {
 	assertions := require.New(t)
-	requestCount := 0
+	// atomic: each request is served on its own goroutine
+	var requestCount int64
 	successBody := `{"cnn":"amqp://127.0.0.1:5672/namespace.test","username":"user","password":"plain:password"}`
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestCount++
-		if requestCount < 3 {
+		if atomic.AddInt64(&requestCount, 1) < 3 {
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte(`{"error":"error proxying request: maas-service unavailable"}`))
 			return
@@ -42,7 +43,7 @@ func Test_Failover_GetOrCreateVhost_RetriesOn500(t *testing.T) {
 	vhost, err := rabbitClient.GetOrCreateVhost(context.Background(), classifier.New("test"))
 	assertions.NoError(err)
 	assertions.NotNil(vhost)
-	assertions.Equal(3, requestCount,
+	assertions.Equal(int64(3), atomic.LoadInt64(&requestCount),
 		"transient 5xx should be retried")
 }
 
@@ -50,9 +51,9 @@ func Test_Failover_GetOrCreateVhost_RetriesOn500(t *testing.T) {
 // on the first attempt.
 func Test_Failover_GetOrCreateVhost_400NotRetried(t *testing.T) {
 	assertions := require.New(t)
-	requestCount := 0
+	var requestCount int64
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestCount++
+		atomic.AddInt64(&requestCount, 1)
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`{"error":"bad request"}`))
 	}))
@@ -69,7 +70,7 @@ func Test_Failover_GetOrCreateVhost_400NotRetried(t *testing.T) {
 
 	_, err := rabbitClient.GetOrCreateVhost(context.Background(), classifier.New("test"))
 	assertions.Error(err)
-	assertions.Equal(1, requestCount, "400 must fail immediately, not be retried")
+	assertions.Equal(int64(1), atomic.LoadInt64(&requestCount), "400 must fail immediately, not be retried")
 }
 
 // Test_Failover_GetOrCreateVhost_StaleFieldDoesNotLeakAcrossRetries checks that
@@ -78,11 +79,11 @@ func Test_Failover_GetOrCreateVhost_400NotRetried(t *testing.T) {
 // that field.
 func Test_Failover_GetOrCreateVhost_StaleFieldDoesNotLeakAcrossRetries(t *testing.T) {
 	assertions := require.New(t)
-	requestCount := 0
+	var requestCount int64
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestCount++
+		attempt := atomic.AddInt64(&requestCount, 1)
 		w.WriteHeader(http.StatusOK)
-		if requestCount == 1 {
+		if attempt == 1 {
 			// "password" parses first and sticks before "username" (a number
 			// instead of a string) aborts the unmarshal.
 			_, _ = w.Write([]byte(`{"password":"leaked-old-password","username":123}`))

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"time"
 )
 
@@ -62,7 +61,7 @@ func (e *nonRetryableError) Error() string { return e.err.Error() }
 func (e *nonRetryableError) Unwrap() error { return e.err }
 
 // MarkNonRetryable wraps err so Run/RunCtx stop retrying immediately instead
-// of exhausting the retry budget on it.
+// of spending every remaining attempt on it.
 func MarkNonRetryable(err error) error {
 	if err == nil {
 		return nil
@@ -99,12 +98,12 @@ func IsRetryableStatus(statusCode int) bool {
 // One is enough: it covers a token that expired in flight. A token the provider
 // still considers valid but the server rejects comes back identical on every
 // further attempt, since TokenProvider cannot be told it was rejected.
-var MaxAuthRetries = 1
+const MaxAuthRetries = 1
 
 // ResponseClassifier turns non-2xx maas-agent responses into errors, marking
 // them non-retryable where retrying cannot help.
 //
-// Stateful because 401 has its own budget, so create one per call.
+// Stateful because 401 has its own attempt limit, so create one per call.
 type ResponseClassifier struct {
 	authAttempts int
 }
@@ -115,7 +114,7 @@ func NewResponseClassifier() *ResponseClassifier {
 
 func (c *ResponseClassifier) Classify(statusCode int, status, body string) error {
 	err := fmt.Errorf("response with error code received. Status: %s, body: %s", status, body)
-	if statusCode == http.StatusUnauthorized {
+	if statusCode == 401 {
 		c.authAttempts++
 		if c.authAttempts > MaxAuthRetries {
 			return MarkNonRetryable(err)
@@ -129,7 +128,7 @@ func (c *ResponseClassifier) Classify(statusCode int, status, body string) error
 }
 
 // Run executes task up to Attempts times, sleeping Interval between
-// attempts, until it succeeds or the budget is exhausted. Errors marked via
+// attempts, until it succeeds or the attempts run out. Errors marked via
 // MarkNonRetryable stop the loop immediately.
 func (r *Retry) Run(task func() error) error {
 	return r.RunCtx(context.Background(), func(context.Context) error {

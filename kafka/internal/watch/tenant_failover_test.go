@@ -15,7 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Once the connection retry budget is exhausted, the broadcaster gives up and
+// Once the connection retry attempts run out, the broadcaster gives up and
 // surfaces the error; a later Watch call must revive it and retry the
 // connection again rather than leaving it permanently dead.
 func Test_TenantWatch_GivesUpAfterRetriesExhausted_ThenRevivesOnNextWatch(t *testing.T) {
@@ -76,6 +76,7 @@ func Test_TenantWatch_SlowNotifyDoesNotBlockEventMerging(t *testing.T) {
 		name:      "r1",
 		namespace: "ns",
 		userCtx:   userCtx,
+		cancel:    cancelUser, // stop() derefs it if the fetch ever returns an error
 		queue:     make(chan []testResource, 1),
 	}}
 
@@ -103,6 +104,47 @@ func Test_TenantWatch_SlowNotifyDoesNotBlockEventMerging(t *testing.T) {
 
 	close(releaseFetch)
 	<-notifyDone
+}
+
+// The fetch is bound to the round context, so ending a round surfaces as a
+// context error. That is not a failure of the watcher, and stopping it there
+// would drop a healthy subscription.
+func Test_TenantWatch_RoundCancellationDoesNotStopWatcher(t *testing.T) {
+	fetching := make(chan struct{})
+	b := &TenantWatchBroadcaster[testResource]{
+		tenants: make(chan []watch.Tenant),
+		getResources: func(ctx context.Context, keys classifier.Keys, tenants []watch.Tenant) ([]testResource, error) {
+			close(fetching)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+	userCtx, cancelUser := context.WithCancel(context.Background())
+	defer cancelUser()
+	b.watchers = []*watcher[testResource]{{
+		name:      "r1",
+		namespace: "ns",
+		userCtx:   userCtx,
+		cancel:    cancelUser,
+		queue:     make(chan []testResource, 1),
+	}}
+
+	roundCtx, cancelRound := context.WithCancel(context.Background())
+	notifyDone := make(chan struct{})
+	go func() {
+		defer close(notifyDone)
+		b.notifyWatchers(roundCtx, []watch.Tenant{{ExternalId: "1", Status: watch.StatusActive}})
+	}()
+
+	<-fetching // the fetch is in flight
+	cancelRound()
+
+	select {
+	case <-notifyDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("notifyWatchers did not return after its round was cancelled")
+	}
+	assert.NoError(t, userCtx.Err(), "cancelling a round must not stop the watcher")
 }
 
 // A watcher that stops draining its queue must not wedge the broadcaster: the

@@ -102,7 +102,9 @@ func TestWatchOnCreateResources_RecoversAfterTransientErrors(t *testing.T) {
 		})
 
 	called := make(chan testResource, 1)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// two 503s cost ~1s + ~2s of backoff at the default interval, so a 5s deadline
+	// leaves almost no slack on a loaded runner
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
 	err := client.WatchOnCreateResources(ctx, cls, func(r testResource) {

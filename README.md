@@ -61,10 +61,11 @@ To create MaaS rabbit go client with Cloud-Core defaults use the following libra
 
 ## Retry behaviour
 
-Every CRUD call to maas-agent (Kafka and Rabbit alike) is retried
+Every CRUD call to maas-agent (Kafka and Rabbit alike) is retried up to
 `util.DefaultRetryAttempts` times with `util.DefaultRetryInterval` between
-attempts. Retries stop early when the request context is done, so a caller
-deadline always wins over the retry budget.
+attempts; some statuses stop earlier, see the table below. Retries stop early
+when the request context is done, so a caller deadline always wins over the
+remaining attempts.
 
 Which responses are retried:
 
@@ -87,6 +88,13 @@ CRUD calls are bounded instead by `CrudClient.AttemptTimeout`
 (`util.DefaultAttemptTimeout`, 30s), applied per attempt, so a caller passing
 `context.Background()` to an unresponsive agent still gets an error rather than
 hanging. A shorter deadline on the caller's context wins over it.
+
+Note what that bound is worth in the worst case: an agent that accepts the
+connection and never answers costs `30 × (30s + 1s)` ≈ **15.5 minutes** before
+the call returns. That is better than hanging forever, but it is not a short
+wait — pass a context with a deadline of your own, or lower
+`util.DefaultAttemptTimeout` / `util.DefaultRetryAttempts`, if your caller needs
+to fail sooner.
 
 `GetTopic`/`GetVhost` keep treating `404` as "not found" and return `nil` after
 a single request.
