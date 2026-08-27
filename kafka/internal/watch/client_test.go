@@ -260,7 +260,11 @@ func TestWatch_ValidClassifier_StartsBroadcasterAndTriggersCallback(t *testing.T
 
 	client.connectToWebSocket = func(ctx context.Context, tenantManagerUrl string, dialer *websocket.Dialer, authSupplier func(ctx context.Context) (string, error), onConnect func()) error {
 		onConnect()
-		return nil
+		// mirror the real connectToWS: it blocks reading frames until the context is cancelled.
+		// returning nil here would send start()'s reconnect loop into a tight spin for the rest
+		// of the test binary's run.
+		<-ctx.Done()
+		return ctx.Err()
 	}
 
 	callback := func(r []testResource, err error) {
@@ -283,19 +287,27 @@ func TestWatch_ValidClassifier_StartsBroadcasterAndTriggersCallback(t *testing.T
 	timeout := time.After(500 * time.Millisecond)
 	tick := time.Tick(5 * time.Millisecond)
 
+	isCalled := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return called
+	}
+
 	waited := false
 	for !waited {
 		select {
 		case <-timeout:
 			waited = true
 		case <-tick:
-			if called {
+			if isCalled() {
 				waited = true
 				break
 			}
 		}
 	}
 
+	mu.Lock()
+	defer mu.Unlock()
 	assert.True(t, called, "callback should be triggered")
 	require.Len(t, received, 1)
 	assert.Equal(t, "r1", received[0].classifier["name"])
@@ -307,8 +319,11 @@ func (b *TenantWatchBroadcaster[T]) NotifyForTest(tenants []watch.Tenant) {
 		b.internalProcCtx, b.cancel = context.WithCancel(context.Background())
 		go b.processLoop(b.internalProcCtx)
 	}
+	// blocking send with a timeout: a non-blocking send would silently drop the event
+	// whenever processLoop is not parked on the receive at this exact moment
 	select {
 	case b.tenants <- tenants:
-	default:
+	case <-time.After(2 * time.Second):
+		panic("NotifyForTest: broadcaster did not consume tenants within 2s")
 	}
 }
