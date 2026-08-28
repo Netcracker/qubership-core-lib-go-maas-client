@@ -114,10 +114,6 @@ func (d *CrudClient) GetOrCreateTopic(ctx context.Context, keys classifier.Keys,
 		}
 		logger.InfoC(ctx, "Get or Create topic by classifier %v", keys)
 		request := d.HttpClient.R().SetContext(ctx).SetBody(reqBody)
-		err := d.addAuthToken(ctx, request)
-		if err != nil {
-			return fmt.Errorf("failed to add auth token to request: %w", err)
-		}
 		if len(opt.OnTopicExists) > 0 {
 			request.SetQueryParam(OnTopicExistsQueryParam, string(opt.OnTopicExists))
 		}
@@ -149,10 +145,6 @@ func (d *CrudClient) GetTopic(ctx context.Context, keys classifier.Keys) (*model
 	err := util.NewRetry(d.RetryAttempts, d.RetryInterval).Run(func() error {
 		logger.InfoC(ctx, "Get topic by classifier %v", keys)
 		request := d.HttpClient.R().SetContext(ctx).SetBody(keys)
-		err := d.addAuthToken(ctx, request)
-		if err != nil {
-			return fmt.Errorf("failed to add auth token to request: %w", err)
-		}
 		response, err := request.Post(d.MaasAgentUrl + "/api/v1/kafka/topic/get-by-classifier")
 		if err != nil {
 			return fmt.Errorf("failed to send request to maas-agent. Cause: %w", err)
@@ -184,10 +176,6 @@ func (d *CrudClient) DeleteTopic(ctx context.Context, classifier classifier.Keys
 		body := TopicSearchRequest{Classifier: classifier}
 		logger.InfoC(ctx, "Get or Create topic by classifier %v", classifier)
 		request := d.HttpClient.R().SetContext(ctx).SetBody(body)
-		err := d.addAuthToken(ctx, request)
-		if err != nil {
-			return fmt.Errorf("failed to add auth token to request: %w", err)
-		}
 		response, err := request.Delete(d.MaasAgentUrl + "/api/v1/kafka/topic")
 		if err != nil {
 			return fmt.Errorf("failed to send request to maas-agent. Cause: %w", err)
@@ -200,14 +188,6 @@ func (d *CrudClient) DeleteTopic(ctx context.Context, classifier classifier.Keys
 	})
 }
 
-func (d *CrudClient) addAuthToken(ctx context.Context, request *resty.Request) error {
-	token, err := d.Auth(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get auth token: %w", err)
-	}
-	request.Header.Add("Authorization", "Bearer "+token)
-	return nil
-}
 
 func newTopicAddress(response TopicResponse) (*model.TopicAddress, error) {
 	bootstrapServers := make(map[string][]string)
