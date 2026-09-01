@@ -3,7 +3,6 @@ package internal
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -19,7 +18,6 @@ import (
 var (
 	testNamespace        = " test-namespace"
 	waitTimeout          = 3 * time.Second
-	testToken            = "test-token"
 	defaultRetryAttempts = 5
 	defaultRetryInterval = 10 * time.Millisecond
 )
@@ -34,7 +32,6 @@ func Test_GetOrCreateTopic(t *testing.T) {
 	wg.Add(2)
 	ts := createTestServer(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == resty.MethodPost && r.URL.Path == "/api/v1/kafka/topic" {
-			assertions.Equal(fmt.Sprintf("Bearer %s", testToken), r.Header.Get("Authorization"))
 			onTopicExistsQueryParam := r.URL.Query().Get(OnTopicExistsQueryParam)
 			assertions.NotEmpty(onTopicExistsQueryParam)
 			w.WriteHeader(http.StatusOK)
@@ -95,7 +92,6 @@ func Test_GetOrCreateTopicWithRetry(t *testing.T) {
 	attempts := defaultRetryAttempts - 1
 	ts := createTestServer(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == resty.MethodPost && r.URL.Path == "/api/v1/kafka/topic" {
-			assertions.Equal(fmt.Sprintf("Bearer %s", testToken), r.Header.Get("Authorization"))
 			onTopicExistsQueryParam := r.URL.Query().Get(OnTopicExistsQueryParam)
 			assertions.NotEmpty(onTopicExistsQueryParam)
 			if attempts > 0 {
@@ -155,7 +151,6 @@ func Test_GetTopic(t *testing.T) {
 	wg.Add(2)
 	ts := createTestServer(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == resty.MethodPost && r.URL.Path == "/api/v1/kafka/topic/get-by-classifier" {
-			assertions.Equal(fmt.Sprintf("Bearer %s", testToken), r.Header.Get("Authorization"))
 			w.WriteHeader(http.StatusOK)
 			topicResp := TopicResponse{
 				Addresses:         map[string][]string{"PLAINTEXT": {"server1:9092", "server2:9092"}},
@@ -207,7 +202,6 @@ func Test_GetTopicWithRetry(t *testing.T) {
 	attempts := defaultRetryAttempts - 1
 	ts := createTestServer(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == resty.MethodPost && r.URL.Path == "/api/v1/kafka/topic/get-by-classifier" {
-			assertions.Equal(fmt.Sprintf("Bearer %s", testToken), r.Header.Get("Authorization"))
 			if attempts > 0 {
 				attempts--
 				w.WriteHeader(http.StatusInternalServerError)
@@ -260,7 +254,6 @@ func Test_DeleteTopic(t *testing.T) {
 	wg.Add(2)
 	ts := createTestServer(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == resty.MethodDelete && r.URL.Path == "/api/v1/kafka/topic" {
-			assertions.Equal(fmt.Sprintf("Bearer %s", testToken), r.Header.Get("Authorization"))
 			w.WriteHeader(http.StatusOK)
 			wg.Done()
 		}
@@ -280,7 +273,6 @@ func Test_DeleteTopicWithRetry(t *testing.T) {
 	attempts := defaultRetryAttempts - 1
 	ts := createTestServer(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == resty.MethodDelete && r.URL.Path == "/api/v1/kafka/topic" {
-			assertions.Equal(fmt.Sprintf("Bearer %s", testToken), r.Header.Get("Authorization"))
 			if attempts > 0 {
 				attempts--
 				w.WriteHeader(http.StatusInternalServerError)
@@ -296,9 +288,7 @@ func Test_DeleteTopicWithRetry(t *testing.T) {
 }
 
 func newKafkaClient(agentUrl string) *MaasClient {
-	crudClient := &CrudClient{MaasAgentUrl: agentUrl, Namespace: testNamespace, HttpClient: resty.New(), Auth: func(ctx context.Context) (string, error) {
-		return testToken, nil
-	}, RetryAttempts: defaultRetryAttempts, RetryInterval: defaultRetryInterval}
+	crudClient := &CrudClient{MaasAgentUrl: agentUrl, Namespace: testNamespace, HttpClient: resty.New(), RetryAttempts: defaultRetryAttempts, RetryInterval: defaultRetryInterval}
 	return &MaasClient{namespace: testNamespace, crudClient: crudClient}
 }
 
