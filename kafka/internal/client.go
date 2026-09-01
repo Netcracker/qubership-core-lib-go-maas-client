@@ -88,7 +88,6 @@ type CrudClient struct {
 	MaasAgentUrl  string
 	Namespace     string
 	HttpClient    *resty.Client
-	Auth          func(ctx context.Context) (string, error)
 	RetryAttempts int
 	RetryInterval time.Duration
 }

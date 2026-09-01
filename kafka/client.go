@@ -19,7 +19,6 @@ func NewClient(namespace string, maasAgentUrl string, tenantManagerUrl string, h
 		MaasAgentUrl:  maasAgentUrl,
 		Namespace:     namespace,
 		HttpClient:    httpClient,
-		Auth:          authSupplier,
 		RetryInterval: util.DefaultRetryInterval,
 		RetryAttempts: util.DefaultRetryAttempts,
 	}
