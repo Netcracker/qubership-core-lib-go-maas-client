@@ -60,7 +60,6 @@ func failoverCrudClient(agentUrl string, retryAttempts int, retryInterval time.D
 		MaasAgentUrl:  agentUrl,
 		Namespace:     testNamespace,
 		HttpClient:    resty.New(),
-		Auth:          func(ctx context.Context) (string, error) { return testToken, nil },
 		RetryAttempts: retryAttempts,
 		RetryInterval: retryInterval,
 	}
@@ -214,7 +213,6 @@ func Test_Failover_TransportErrorMakesExactlyTheConfiguredAttempts(t *testing.T)
 		MaasAgentUrl:  agentUrl,
 		Namespace:     testNamespace,
 		HttpClient:    resty.New(),
-		Auth:          func(ctx context.Context) (string, error) { return testToken, nil },
 		RetryAttempts: 3,
 		RetryInterval: 5 * time.Millisecond,
 	}
@@ -266,7 +264,6 @@ func Test_Failover_UnresponsiveAgentIsBoundedWithoutCallerDeadline(t *testing.T)
 		MaasAgentUrl:   "http://" + listener.Addr().String(),
 		Namespace:      testNamespace,
 		HttpClient:     resty.New(),
-		Auth:           func(ctx context.Context) (string, error) { return testToken, nil },
 		RetryAttempts:  2,
 		RetryInterval:  5 * time.Millisecond,
 		AttemptTimeout: 100 * time.Millisecond,
