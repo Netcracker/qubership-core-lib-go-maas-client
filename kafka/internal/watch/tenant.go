@@ -27,7 +27,6 @@ func NewTenantWatchClient[T Resource](tenantManagerUrl string,
 	tenantWatchBroadcaster := &TenantWatchBroadcaster[T]{
 		watchers:         []*watcher[T]{},
 		tenants:          make(chan []watch.Tenant),
-		lock:             &sync.RWMutex{},
 		startOnce:        &sync.Once{},
 		getResources:     getResources,
 		tenantManagerUrl: tenantManagerUrl,
@@ -49,7 +48,8 @@ type TenantWatchBroadcaster[T Resource] struct {
 	internalProcCtx    context.Context
 	currentTenants     []watch.Tenant
 	tenants            chan []watch.Tenant
-	lock               *sync.RWMutex
+	// By value so the zero value is usable: never copy the struct.
+	lock               sync.RWMutex
 	cancel             context.CancelFunc
 	startOnce          *sync.Once
 	getResources       func(ctx context.Context, keys classifier.Keys, tenants []watch.Tenant) ([]T, error)
@@ -62,25 +62,29 @@ type TenantWatchBroadcaster[T Resource] struct {
 
 func (b *TenantWatchBroadcaster[T]) start() error {
 	logger.Info("Starting tenant watch broadcaster")
-	b.internalProcCtx, b.cancel = context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
+	b.lock.Lock()
+	b.internalProcCtx = ctx
+	b.cancel = cancel
+	b.lock.Unlock()
+
 	readyChan := make(chan error, 1)
-	go b.processLoop(b.internalProcCtx)
+	go b.processLoop(ctx)
 	go func() {
 		var err error
 		defer func() {
-			// if all retries were used, remove all clients from notification list
-			// and then stop ourselves so internalProcCtx is cancelled and every client gets notified and have a chance to handel it (re-connect or terminate)
-			// do it in separate go routine because it requires to use global lock which currently can be hold by the client's invocation of Watch()
+			// clean up before releasing the blocked Watch(), so the next Watch()
+			// starts a fresh connection instead of racing this cleanup
+			b.removeAllWatchersAndStop()
 			select {
 			case readyChan <- err:
 			default:
 			}
-			b.removeAllWatchersAndStop()
 		}()
 		retries := 0
 		for {
 			select {
-			case <-b.internalProcCtx.Done():
+			case <-ctx.Done():
 				return
 			default:
 				onConnect := func() {
@@ -90,14 +94,14 @@ func (b *TenantWatchBroadcaster[T]) start() error {
 					default:
 					}
 				}
-				err = b.connectToWebSocket(b.internalProcCtx, b.tenantManagerUrl, b.dialer, b.authSupplier, onConnect)
+				err = b.connectToWebSocket(ctx, b.tenantManagerUrl, b.dialer, b.authSupplier, onConnect)
 				if err != nil {
 					if errors.Is(err, context.Canceled) || retries >= util.DefaultRetryAttempts {
 						return
 					}
 					retries++
 					duration := time.Duration(int32(retries)) * util.DefaultRetryInterval
-					logger.ErrorC(b.internalProcCtx, "failed to connect to tenant manager web socket due to: %v, \nretrying after %f seconds", err, duration.Seconds())
+					logger.ErrorC(ctx, "failed to connect to tenant manager web socket due to: %v, \nretrying after %f seconds", err, duration.Seconds())
 					time.Sleep(duration)
 					continue
 				}
@@ -117,13 +121,9 @@ func (b *TenantWatchBroadcaster[T]) stop() {
 	b.startOnce = &sync.Once{}
 }
 
+// Watch registers a callback and returns once the shared connection comes up or
+// gives up. Failures afterwards arrive through the callback.
 func (b *TenantWatchBroadcaster[T]) Watch(ctx context.Context, classifierKey classifier.Keys, callback func([]T, error)) error {
-	b.lock.Lock()
-	defer func() {
-		b.watchCounter++
-		b.lock.Unlock()
-	}()
-
 	name := classifierKey[classifier.Name]
 	namespace := classifierKey[classifier.Namespace]
 	if name == "" || namespace == "" {
@@ -132,10 +132,14 @@ func (b *TenantWatchBroadcaster[T]) Watch(ctx context.Context, classifierKey cla
 	if _, present := classifierKey[classifier.TenantId]; present {
 		return fmt.Errorf("classifier cannot contain '%s' param", classifier.TenantId)
 	}
+
+	b.lock.Lock()
+	watchId := b.watchCounter
+	b.watchCounter++
 	userCtx, cancelUserCtx := context.WithCancel(ctx)
-	logger.InfoC(userCtx, "Starting watcher#%d with name=%s, namespace=%s", b.watchCounter, name, namespace)
+	logger.InfoC(userCtx, "Starting watcher#%d with name=%s, namespace=%s", watchId, name, namespace)
 	w := watcher[T]{
-		id:          b.watchCounter,
+		id:          watchId,
 		name:        name,
 		namespace:   namespace,
 		callback:    callback,
@@ -145,17 +149,30 @@ func (b *TenantWatchBroadcaster[T]) Watch(ctx context.Context, classifierKey cla
 		broadcaster: b,
 	}
 	b.watchers = append(b.watchers, &w)
+	// capture startOnce before unlocking: start() blocks and must not hold the lock
+	startOnce := b.startOnce
+	b.lock.Unlock()
 
 	var err error
-	b.startOnce.Do(func() {
+	startOnce.Do(func() {
 		err = b.start()
 	})
-	go w.run()
-	logger.InfoC(userCtx, "Started watcher#%d", b.watchCounter)
-	// re-enqueue tenants so broadcaster can re-sent tenants to the just added watcher
-	go func() {
-		b.tenants <- b.currentTenants
-	}()
+
+	// bind the watcher to the round active now, so a later round cannot race with it
+	b.lock.RLock()
+	procCtx := b.internalProcCtx
+	b.lock.RUnlock()
+
+	go w.run(procCtx)
+	logger.InfoC(userCtx, "Started watcher#%d", watchId)
+	// re-enqueue tenants for the just added watcher. Bound to the round: b.tenants is
+	// unbuffered, so an unguarded send would leak into the next round.
+	go func(procCtx context.Context, tenants []watch.Tenant) {
+		select {
+		case b.tenants <- tenants:
+		case <-procCtx.Done():
+		}
+	}(procCtx, b.snapshotTenants())
 	return err
 }
 
@@ -214,17 +231,23 @@ func (b *TenantWatchBroadcaster[T]) readEvents(ctx context.Context, subscription
 			// merge received tenants with current ones
 			changed := b.mergeTenants(&event)
 			if changed {
-				logger.InfoC(ctx, "Broadcasting updated active tenant list: %v", b.currentTenants)
-				b.tenants <- b.currentTenants
+				tenants := b.snapshotTenants()
+				logger.InfoC(ctx, "Broadcasting updated active tenant list: %v", tenants)
+				// unbuffered: a plain send would block forever once the round is cancelled
+				select {
+				case b.tenants <- tenants:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
 			}
 		}
 	}
 }
 
 func (b *TenantWatchBroadcaster[T]) removeAllWatchersAndStop() {
-	logger.InfoC(b.internalProcCtx, "Removing all watchers")
 	b.lock.Lock()
 	defer b.lock.Unlock()
+	logger.InfoC(b.internalProcCtx, "Removing all watchers")
 	b.watchers = nil
 	b.stop()
 }
@@ -252,92 +275,151 @@ func (b *TenantWatchBroadcaster[T]) processLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case tenants := <-b.tenants:
-			b.notifyWatchers(tenants)
+			b.notifyWatchers(ctx, tenants)
 		}
 	}
 }
 
-func (b *TenantWatchBroadcaster[T]) notifyWatchers(tenants []watch.Tenant) {
-	b.lock.Lock()
-	defer b.lock.Unlock()
+// notifyWatchers fetches resources per watcher and hands them to its queue.
+// Called only from processLoop, so at most one notify is in flight.
+func (b *TenantWatchBroadcaster[T]) notifyWatchers(ctx context.Context, tenants []watch.Tenant) {
+	b.lock.RLock()
+	watchers := make([]*watcher[T], len(b.watchers))
+	copy(watchers, b.watchers)
+	b.lock.RUnlock()
 
-	for _, w := range b.watchers {
-		if reflect.DeepEqual(w.lastNotifiedTenants, tenants) {
+	for _, w := range watchers {
+		if b.alreadyNotified(w, tenants) {
 			continue
 		}
 		keys := classifier.New(w.name).WithNamespace(w.namespace)
-		resources, err := b.getResources(w.userCtx, keys, tenants)
+		// bound the fetch by both contexts, so cancelling the round does not wait
+		// out an in-flight request
+		fetchCtx, cancelFetch := mergeCancel(w.userCtx, ctx)
+		resources, err := b.getResources(fetchCtx, keys, tenants)
+		cancelFetch()
 		if err != nil {
-			logger.ErrorC(b.internalProcCtx, "Failed to get resources: %s", err.Error())
+			// a cancelled context is the round or the watcher ending, not a failure
+			// of this watcher: stopping it here would drop a healthy subscription
+			if ctx.Err() != nil {
+				return
+			}
+			if w.userCtx.Err() != nil {
+				continue
+			}
+			logger.ErrorC(ctx, "Failed to get resources: %s", err.Error())
 			w.stop()
-		} else if len(resources) > 0 {
-			w.queue <- resources
-			w.lastNotifiedTenants = tenants
+			continue
+		}
+		if len(resources) == 0 {
+			continue
+		}
+		select {
+		case w.queue <- resources:
+			b.setNotified(w, tenants)
+		case <-w.userCtx.Done():
+			// watcher is going away and will not drain its queue
+		case <-ctx.Done():
+			return
 		}
 	}
 }
 
+// mergeCancel returns a context cancelled when either parent is cancelled.
+// The returned cancel must be called to release the watcher it installs.
+func mergeCancel(primary, other context.Context) (context.Context, context.CancelFunc) {
+	merged, cancel := context.WithCancel(primary)
+	stop := context.AfterFunc(other, cancel)
+	return merged, func() {
+		stop()
+		cancel()
+	}
+}
+
+func (b *TenantWatchBroadcaster[T]) alreadyNotified(w *watcher[T], tenants []watch.Tenant) bool {
+	b.lock.RLock()
+	defer b.lock.RUnlock()
+	return reflect.DeepEqual(w.lastNotifiedTenants, tenants)
+}
+
+func (b *TenantWatchBroadcaster[T]) setNotified(w *watcher[T], tenants []watch.Tenant) {
+	b.lock.Lock()
+	defer b.lock.Unlock()
+	w.lastNotifiedTenants = tenants
+}
+
+// mergeTenants applies the event to currentTenants. All writes go through here,
+// under the write lock.
 func (b *TenantWatchBroadcaster[T]) mergeTenants(event *watch.TenantWatchEvent) bool {
+	b.lock.Lock()
+	defer b.lock.Unlock()
+	return b.mergeTenantsLocked(event)
+}
+
+// snapshotTenants returns the current list for another goroutine. The slice is
+// safe to share: mergeTenantsLocked replaces it rather than mutating in place.
+func (b *TenantWatchBroadcaster[T]) snapshotTenants() []watch.Tenant {
+	b.lock.RLock()
+	defer b.lock.RUnlock()
+	return b.currentTenants
+}
+
+func (b *TenantWatchBroadcaster[T]) mergeTenantsLocked(event *watch.TenantWatchEvent) bool {
 	switch event.Type {
 	case watch.SUBSCRIBED:
 		logger.Info("Subscription event received. Tenants: %v", event.Tenants)
-		b.currentTenants = filterTenants(event.Tenants, func(tenant watch.Tenant) bool {
-			return tenant.Status == watch.StatusActive
-		})
+		b.currentTenants = filterTenants(event.Tenants, isActiveTenant)
 		return true
 	case watch.CREATED:
 		// ignore this event. we are interested only in ACTIVE tenants
 		return false
 	case watch.MODIFIED:
 		logger.Info("Modify event received: Tenants: %v", event.Tenants)
-		changedTenants := filterTenants(event.Tenants, func(tenant watch.Tenant) bool {
-			return tenant.Status == watch.StatusSuspended || tenant.Status == watch.StatusActive
-		})
-		if len(changedTenants) == 0 {
-			return false
-		} else {
-			var result []watch.Tenant
-			for _, current := range b.currentTenants {
-				add := true
-				for _, changed := range changedTenants {
-					if changed.Status == watch.StatusSuspended && current.ExternalId == changed.ExternalId {
-						add = false
-						break
-					}
-				}
-				if add {
-					result = append(result, current)
-				}
-			}
-			for _, changed := range changedTenants {
-				if changed.Status == watch.StatusActive {
-					result = append(result, changed)
-				}
-			}
-			b.currentTenants = result
-			return true
-		}
+		return b.applyModifiedLocked(event.Tenants)
 	case watch.DELETED:
 		logger.Info("Deleted event received: Tenants: %v", event.Tenants)
-		var result []watch.Tenant
-		for _, current := range b.currentTenants {
-			add := true
-			for _, deleted := range event.Tenants {
-				if current.ExternalId == deleted.ExternalId {
-					add = false
-					break
-				}
-			}
-			if add {
-				result = append(result, current)
-			}
-		}
-		b.currentTenants = result
+		b.currentTenants = withoutTenants(b.currentTenants, event.Tenants)
 		return true
 	default:
 		logger.Errorf("Unknown event received. Event: %+v", event)
 		return false
 	}
+}
+
+// applyModifiedLocked drops the tenants that went suspended and adds the ones
+// that went active. Reports whether anything changed.
+func (b *TenantWatchBroadcaster[T]) applyModifiedLocked(tenants []watch.Tenant) bool {
+	changed := filterTenants(tenants, func(tenant watch.Tenant) bool {
+		return tenant.Status == watch.StatusSuspended || tenant.Status == watch.StatusActive
+	})
+	if len(changed) == 0 {
+		return false
+	}
+	suspended := filterTenants(changed, func(tenant watch.Tenant) bool {
+		return tenant.Status == watch.StatusSuspended
+	})
+	b.currentTenants = append(withoutTenants(b.currentTenants, suspended),
+		filterTenants(changed, isActiveTenant)...)
+	return true
+}
+
+// withoutTenants returns current without the tenants sharing an external id with remove.
+func withoutTenants(current, remove []watch.Tenant) []watch.Tenant {
+	if len(remove) == 0 {
+		return current
+	}
+	removed := make(map[string]struct{}, len(remove))
+	for _, tenant := range remove {
+		removed[tenant.ExternalId] = struct{}{}
+	}
+	return filterTenants(current, func(tenant watch.Tenant) bool {
+		_, found := removed[tenant.ExternalId]
+		return !found
+	})
+}
+
+func isActiveTenant(tenant watch.Tenant) bool {
+	return tenant.Status == watch.StatusActive
 }
 
 func filterTenants(tenants []watch.Tenant, predicate func(tenant watch.Tenant) bool) []watch.Tenant {
@@ -372,13 +454,15 @@ func (w *watcher[T]) process(resources []T, err error) {
 	w.callback(resources, err)
 }
 
-func (w *watcher[T]) run() {
+// run drives the watcher until either context ends it. procCtx belongs to the
+// broadcaster and is passed in rather than held, so the watcher owns no context.
+func (w *watcher[T]) run(procCtx context.Context) {
 	for {
 		select {
-		case <-w.broadcaster.internalProcCtx.Done():
+		case <-procCtx.Done():
 			// internal watcher process was canceled, we need to stop and notify all clients
 			var empty []T
-			w.process(empty, w.broadcaster.internalProcCtx.Err())
+			w.process(empty, procCtx.Err())
 			return
 		case <-w.userCtx.Done():
 			w.broadcaster.removeWatcher(w)

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -708,7 +709,8 @@ func Test_WatchTenantTopicsClientNotifiedAboutConnectError(t *testing.T) {
 	abortWebSocketWg1 := &sync.WaitGroup{}
 	abortWebSocketWg1.Add(1)
 
-	testPhase := 0
+	// atomic: written by the test goroutine, read by the http handler goroutine
+	var testPhase atomic.Int32
 
 	ts := createTestServer(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == resty.MethodPost && r.URL.Path == "/api/v1/kafka/topic/get-by-classifier" {
@@ -726,7 +728,7 @@ func Test_WatchTenantTopicsClientNotifiedAboutConnectError(t *testing.T) {
 			strings.HasPrefix(r.URL.Path, "/api/v4/tenant-manager/watch") &&
 			r.Header.Get("Authorization") == "Bearer " + testTokenValue {
 
-			if testPhase != 0 {
+			if testPhase.Load() != 0 {
 				w.WriteHeader(http.StatusInternalServerError)
 				return
 			}
@@ -768,7 +770,7 @@ func Test_WatchTenantTopicsClientNotifiedAboutConnectError(t *testing.T) {
 	wg2 := &sync.WaitGroup{}
 	wg2.Add(1)
 	err := client.WatchTenantKafkaTopics(watchCtx1, classifierKeys, func(topics []model.TopicAddress, err error) {
-		if testPhase == 0 {
+		if testPhase.Load() == 0 {
 			assertions.Equal(1, len(topics))
 			wg1.Done()
 		} else {
@@ -781,7 +783,7 @@ func Test_WatchTenantTopicsClientNotifiedAboutConnectError(t *testing.T) {
 
 	assertions.True(waitWithTimeout(wg1, timeout))
 
-	testPhase++
+	testPhase.Add(1)
 	abortWebSocketWg1.Done()
 
 	assertions.True(waitWithTimeout(wg2, timeout))
@@ -793,8 +795,6 @@ func Test_WatchTenantTopicsSubscribeTimeout(t *testing.T) {
 
 	classifierKeys := classifier.New("test").WithNamespace(testNamespace)
 
-	var wsConn *websocket.Conn
-
 	util.DefaultRetryAttempts = 1
 	util.DefaultRetryInterval = 100 * time.Millisecond
 
@@ -803,8 +803,8 @@ func Test_WatchTenantTopicsSubscribeTimeout(t *testing.T) {
 			strings.HasPrefix(r.URL.Path, "/api/v4/tenant-manager/watch") &&
 			r.Header.Get("Authorization") == "Bearer " + testTokenValue {
 
-			var err error
-			wsConn, err = (&websocket.Upgrader{}).Upgrade(w, r, nil)
+			// local: every retry is served on its own goroutine
+			wsConn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
 			assertions.NoError(err)
 
 			f1, err := readStompMsg(wsConn)
@@ -851,9 +851,6 @@ func Test_WatchTenantTopicsInfiniteLoop(t *testing.T) {
 		Namespace:  classifierKeys[classifier.Namespace],
 	}
 
-	var stompDestination, stompSubscriptionId string
-	var wsConn *websocket.Conn
-
 	util.DefaultRetryAttempts = 1
 	util.DefaultRetryInterval = 100 * time.Millisecond
 
@@ -861,7 +858,8 @@ func Test_WatchTenantTopicsInfiniteLoop(t *testing.T) {
 	wg1.Add(1)
 	wg2 := &sync.WaitGroup{}
 	wg2.Add(1)
-	attempt := 0
+	// atomic: each reconnect is served on its own goroutine
+	var attempt atomic.Int32
 
 	ts := createTestServer(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == resty.MethodPost && r.URL.Path == "/api/v1/kafka/topic/get-by-classifier" {
@@ -879,11 +877,10 @@ func Test_WatchTenantTopicsInfiniteLoop(t *testing.T) {
 			strings.HasPrefix(r.URL.Path, "/api/v4/tenant-manager/watch") &&
 			r.Header.Get("Authorization") == "Bearer " + testTokenValue {
 
-			attempt++
-			fmt.Printf("attempt=%d\n", attempt)
+			thisAttempt := attempt.Add(1)
+			fmt.Printf("attempt=%d\n", thisAttempt)
 
-			var err error
-			wsConn, err = (&websocket.Upgrader{}).Upgrade(w, r, nil)
+			wsConn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
 			assertions.NoError(err)
 
 			f1, err := readStompMsg(wsConn)
@@ -897,14 +894,14 @@ func Test_WatchTenantTopicsInfiniteLoop(t *testing.T) {
 			assertions.NoError(err)
 			assertions.Equal("SUBSCRIBE", f3.Command)
 
-			stompDestination, _ = f3.Contains("destination")
-			stompSubscriptionId, _ = f3.Contains("id")
+			stompDestination, _ := f3.Contains("destination")
+			stompSubscriptionId, _ := f3.Contains("id")
 
-			if attempt == 1 {
+			// the first two connections hang, so the watcher has to reconnect twice
+			if thisAttempt < 3 {
 				select {}
-			} else if attempt == 2 {
-				select {}
-			} else if attempt == 3 {
+			}
+			if thisAttempt == 3 {
 				assertions.NoError(sendTenantEvent(wsConn, stompDestination, stompSubscriptionId, tenantEvent1))
 			}
 		}
@@ -932,13 +929,14 @@ func Test_WatchTenantTopicsInfiniteLoop(t *testing.T) {
 					cancelWatching()
 				}
 			})
-			if attempt == 2 {
+			switch attempt.Load() {
+			case 2:
 				assertions.Error(err)
-			} else if attempt == 3 {
+			case 3:
 				assertions.NoError(err)
 			}
 			<-watchCtx.Done()
-			if attempt == 3 {
+			if attempt.Load() == 3 {
 				assertions.True(waitWithTimeout(wg1, timeout))
 				return
 			}
@@ -966,6 +964,11 @@ func Test_WatchTenantTopicsMaasResponseErr(t *testing.T) {
 
 	util.DefaultRetryAttempts = 1
 	util.DefaultRetryInterval = 100 * time.Millisecond
+	// the CRUD call never succeeds here, so it runs for the whole total duration
+	// NewClient reads; without this the test would sit for the default minute
+	originalMaxTotal := util.DefaultMaxTotalDuration
+	util.DefaultMaxTotalDuration = 300 * time.Millisecond
+	t.Cleanup(func() { util.DefaultMaxTotalDuration = originalMaxTotal })
 
 	ts := createTestServer(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == resty.MethodPost && r.URL.Path == "/api/v1/kafka/topic/get-by-classifier" {
