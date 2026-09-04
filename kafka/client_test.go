@@ -964,6 +964,11 @@ func Test_WatchTenantTopicsMaasResponseErr(t *testing.T) {
 
 	util.DefaultRetryAttempts = 1
 	util.DefaultRetryInterval = 100 * time.Millisecond
+	// the CRUD call never succeeds here, so it runs for the whole total duration
+	// NewClient reads; without this the test would sit for the default minute
+	originalMaxTotal := util.DefaultMaxTotalDuration
+	util.DefaultMaxTotalDuration = 300 * time.Millisecond
+	t.Cleanup(func() { util.DefaultMaxTotalDuration = originalMaxTotal })
 
 	ts := createTestServer(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == resty.MethodPost && r.URL.Path == "/api/v1/kafka/topic/get-by-classifier" {

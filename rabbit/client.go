@@ -6,19 +6,15 @@ import (
 	"github.com/netcracker/qubership-core-lib-go-maas-client/v3/util"
 )
 
-// NewClient builds a Rabbit MaaS client.
-//
-// httpClient must not retry on its own: this client already retries, and resty
-// retries multiply it, turning the configured attempts into their product.
-// Pass a plain resty.New() or one with SetRetryCount(0).
+// NewClient builds a Rabbit MaaS client. httpClient must not retry on its own:
+// this client retries, and resty retries would multiply it.
 func NewClient(namespace string, maasAgentUrl string, httpClient *resty.Client) MaasClient {
 	client := &internal.CrudClient{
-		MaasAgentUrl:   maasAgentUrl,
-		Namespace:      namespace,
-		HttpClient:     httpClient,
-		RetryAttempts:  util.DefaultRetryAttempts,
-		RetryInterval:  util.DefaultRetryInterval,
-		AttemptTimeout: util.DefaultAttemptTimeout,
+		MaasAgentUrl:     maasAgentUrl,
+		Namespace:        namespace,
+		HttpClient:       httpClient,
+		MaxTotalDuration: util.DefaultMaxTotalDuration,
+		AttemptTimeout:   util.DefaultAttemptTimeout,
 	}
 
 	return internal.NewRabbitClient(namespace, client)

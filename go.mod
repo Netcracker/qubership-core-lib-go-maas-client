@@ -3,6 +3,7 @@ module github.com/netcracker/qubership-core-lib-go-maas-client/v3
 go 1.26.5
 
 require (
+	github.com/failsafe-go/failsafe-go v0.9.7
 	github.com/go-resty/resty/v2 v2.17.2
 	github.com/gorilla/websocket v1.5.3
 	github.com/netcracker/qubership-core-lib-go-stomp-websocket/v3 v3.6.0
@@ -12,6 +13,7 @@ require (
 )
 
 require (
+	github.com/bits-and-blooms/bitset v1.24.4 // indirect
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect

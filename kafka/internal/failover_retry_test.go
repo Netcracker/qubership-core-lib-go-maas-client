@@ -12,7 +12,6 @@ import (
 
 	"github.com/go-resty/resty/v2"
 	"github.com/netcracker/qubership-core-lib-go-maas-client/v3/classifier"
-	"github.com/netcracker/qubership-core-lib-go-maas-client/v3/util"
 	"github.com/stretchr/testify/require"
 )
 
@@ -23,9 +22,8 @@ type stepBehavior struct {
 	body   string
 }
 
-// newSequencedServer plays back steps in order for requests to path,
-// repeating the last one once exhausted. *requestCount counts matching
-// requests; it is atomic because each request is served on its own goroutine.
+// newSequencedServer plays back steps in order for requests to path, repeating
+// the last one once exhausted. *requestCount is atomic: one goroutine per request.
 func newSequencedServer(path string, steps []stepBehavior, requestCount *int64) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != path {
@@ -55,13 +53,12 @@ func newSequencedServer(path string, steps []stepBehavior, requestCount *int64) 
 	}))
 }
 
-func failoverCrudClient(agentUrl string, retryAttempts int, retryInterval time.Duration) *CrudClient {
+func failoverCrudClient(agentUrl string, maxTotal time.Duration) *CrudClient {
 	return &CrudClient{
-		MaasAgentUrl:  agentUrl,
-		Namespace:     testNamespace,
-		HttpClient:    resty.New(),
-		RetryAttempts: retryAttempts,
-		RetryInterval: retryInterval,
+		MaasAgentUrl:     agentUrl,
+		Namespace:        testNamespace,
+		HttpClient:       resty.New(),
+		MaxTotalDuration: maxTotal,
 	}
 }
 
@@ -116,23 +113,22 @@ func Test_Failover_ResponseTable(t *testing.T) {
 			expectedRequests: 1,
 		},
 		{
-			// the single case a 401 retry exists for
-			name: "token expired in flight: 401 then success",
-			steps: []stepBehavior{
-				{status: http.StatusUnauthorized, body: `{"error":"unauthorized"}`},
-				{status: http.StatusOK, body: successBody},
-			},
-			expectSuccess:    true,
-			expectedRequests: 2,
-		},
-		{
-			// tighter than the generic limit: 1 + MaxAuthRetries, not RetryAttempts
-			name: "rejected credentials: 401 gives up after MaxAuthRetries, not all attempts",
+			// the token comes from the security library, which refreshes it itself
+			name: "401 fails immediately, is not retried",
 			steps: []stepBehavior{
 				{status: http.StatusUnauthorized, body: `{"error":"unauthorized"}`},
 			},
 			expectSuccess:    false,
-			expectedRequests: util.MaxAuthRetries + 1,
+			expectedRequests: 1,
+		},
+		{
+			// a 405 that is not the read-only report is a permanent method error
+			name: "plain 405 fails immediately, is not retried",
+			steps: []stepBehavior{
+				{status: http.StatusMethodNotAllowed, body: `{"error":"method not allowed"}`},
+			},
+			expectSuccess:    false,
+			expectedRequests: 1,
 		},
 		{
 			name: "403 fails immediately, is not retried",
@@ -151,7 +147,7 @@ func Test_Failover_ResponseTable(t *testing.T) {
 			ts := newSequencedServer("/api/v1/kafka/topic", tc.steps, &requestCount)
 			defer ts.Close()
 
-			client := failoverCrudClient(ts.URL, 5, 5*time.Millisecond)
+			client := failoverCrudClient(ts.URL, time.Second)
 
 			_, err := client.GetOrCreateTopic(context.Background(), classifier.New("test"))
 			if tc.expectSuccess {
@@ -174,7 +170,7 @@ func Test_Failover_GetTopic_404NotRetried(t *testing.T) {
 		[]stepBehavior{{status: http.StatusNotFound}}, &requestCount)
 	defer ts.Close()
 
-	client := failoverCrudClient(ts.URL, 5, 5*time.Millisecond)
+	client := failoverCrudClient(ts.URL, time.Second)
 
 	topic, err := client.GetTopic(context.Background(), classifier.New("test"))
 	assertions.NoError(err)
@@ -182,11 +178,9 @@ func Test_Failover_GetTopic_404NotRetried(t *testing.T) {
 	assertions.Equal(int64(1), atomic.LoadInt64(&requestCount), "404 must not be retried")
 }
 
-// Test_Failover_TransportErrorMakesExactlyTheConfiguredAttempts pins the attempt
-// count on the transport-error path - a maas-agent pod going away mid-request.
-// Counting happens at the listener because a dropped connection never reaches a
-// handler.
-func Test_Failover_TransportErrorMakesExactlyTheConfiguredAttempts(t *testing.T) {
+// Test_Failover_TransportErrorRetriesWithinTheLimit checks a maas-agent pod
+// going away mid-request. Counted at the listener: no handler ever runs.
+func Test_Failover_TransportErrorRetriesWithinTheLimit(t *testing.T) {
 	assertions := require.New(t)
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -209,27 +203,22 @@ func Test_Failover_TransportErrorMakesExactlyTheConfiguredAttempts(t *testing.T)
 		}
 	}()
 
-	client := &CrudClient{
-		MaasAgentUrl:  agentUrl,
-		Namespace:     testNamespace,
-		HttpClient:    resty.New(),
-		RetryAttempts: 3,
-		RetryInterval: 5 * time.Millisecond,
-	}
+	client := failoverCrudClient(agentUrl, 300*time.Millisecond)
 
+	start := time.Now()
 	_, err = client.GetOrCreateTopic(context.Background(), classifier.New("test"))
+	elapsed := time.Since(start)
 	assertions.Error(err)
 
 	_ = listener.Close()
 	<-done
 
-	assertions.Equal(int32(3), atomic.LoadInt32(&connections),
-		"the transport-error path must spend exactly RetryAttempts attempts, no more and no fewer")
+	assertions.Greater(atomic.LoadInt32(&connections), int32(1), "a transport error must be retried")
+	assertions.Less(elapsed, 3*time.Second, "retries must stop once the total duration is spent, took %s", elapsed)
 }
 
 // Test_Failover_UnresponsiveAgentIsBoundedWithoutCallerDeadline checks that a
-// call with context.Background() still returns: the agent keeps the connection
-// open and never answers, so only the per-attempt timeout can end it.
+// call with context.Background() still returns against an agent that never answers.
 func Test_Failover_UnresponsiveAgentIsBoundedWithoutCallerDeadline(t *testing.T) {
 	assertions := require.New(t)
 
@@ -261,12 +250,11 @@ func Test_Failover_UnresponsiveAgentIsBoundedWithoutCallerDeadline(t *testing.T)
 	}()
 
 	client := &CrudClient{
-		MaasAgentUrl:   "http://" + listener.Addr().String(),
-		Namespace:      testNamespace,
-		HttpClient:     resty.New(),
-		RetryAttempts:  2,
-		RetryInterval:  5 * time.Millisecond,
-		AttemptTimeout: 100 * time.Millisecond,
+		MaasAgentUrl:     "http://" + listener.Addr().String(),
+		Namespace:        testNamespace,
+		HttpClient:       resty.New(),
+		MaxTotalDuration: 300 * time.Millisecond,
+		AttemptTimeout:   100 * time.Millisecond,
 	}
 
 	start := time.Now()
@@ -287,7 +275,7 @@ func Test_Failover_ContextCancellation(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	client := failoverCrudClient(ts.URL, 5, 200*time.Millisecond)
+	client := failoverCrudClient(ts.URL, 5*time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -298,4 +286,22 @@ func Test_Failover_ContextCancellation(t *testing.T) {
 
 	assertions.Error(err)
 	assertions.Less(elapsed, 400*time.Millisecond, "should abort once context is done instead of exhausting all retries")
+}
+
+// Test_Failover_DeleteTopicRetried checks that a delete survives a switchover:
+// it reports only an error, so a repeat answers the same as the first attempt.
+func Test_Failover_DeleteTopicRetried(t *testing.T) {
+	assertions := require.New(t)
+	var requestCount int64
+	ts := newSequencedServer("/api/v1/kafka/topic", []stepBehavior{
+		{status: http.StatusMethodNotAllowed, body: `{"code":"MAAS-0600","reason":"database is in read-only mode"}`},
+		{status: http.StatusOK},
+	}, &requestCount)
+	defer ts.Close()
+
+	client := failoverCrudClient(ts.URL, time.Second)
+
+	err := client.DeleteTopic(context.Background(), classifier.New("test"))
+	assertions.NoError(err)
+	assertions.Equal(int64(2), atomic.LoadInt64(&requestCount), "a read-only 405 must be retried")
 }

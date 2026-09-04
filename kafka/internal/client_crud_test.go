@@ -16,10 +16,12 @@ import (
 )
 
 var (
-	testNamespace        = " test-namespace"
-	waitTimeout          = 3 * time.Second
-	defaultRetryAttempts = 5
-	defaultRetryInterval = 10 * time.Millisecond
+	testNamespace = " test-namespace"
+	waitTimeout   = 3 * time.Second
+	// stubFailures is how many failures a retry stub serves before succeeding.
+	stubFailures = 2
+	// testMaxTotalDuration is a total duration that fits stubFailures quickly.
+	testMaxTotalDuration = time.Second
 )
 
 func Test_GetOrCreateTopic(t *testing.T) {
@@ -89,7 +91,7 @@ func Test_GetOrCreateTopic(t *testing.T) {
 func Test_GetOrCreateTopicWithRetry(t *testing.T) {
 	assertions := require.New(t)
 	ctx := context.Background()
-	attempts := defaultRetryAttempts - 1
+	attempts := stubFailures
 	ts := createTestServer(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == resty.MethodPost && r.URL.Path == "/api/v1/kafka/topic" {
 			onTopicExistsQueryParam := r.URL.Query().Get(OnTopicExistsQueryParam)
@@ -199,7 +201,7 @@ func Test_GetTopic(t *testing.T) {
 func Test_GetTopicWithRetry(t *testing.T) {
 	assertions := require.New(t)
 	ctx := context.Background()
-	attempts := defaultRetryAttempts - 1
+	attempts := stubFailures
 	ts := createTestServer(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == resty.MethodPost && r.URL.Path == "/api/v1/kafka/topic/get-by-classifier" {
 			if attempts > 0 {
@@ -267,28 +269,9 @@ func Test_DeleteTopic(t *testing.T) {
 	assertions.True(waitWG(waitTimeout, wg))
 }
 
-func Test_DeleteTopicWithRetry(t *testing.T) {
-	assertions := require.New(t)
-	ctx := context.Background()
-	attempts := defaultRetryAttempts - 1
-	ts := createTestServer(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == resty.MethodDelete && r.URL.Path == "/api/v1/kafka/topic" {
-			if attempts > 0 {
-				attempts--
-				w.WriteHeader(http.StatusInternalServerError)
-				return
-			}
-			w.WriteHeader(http.StatusOK)
-		}
-	})
-	defer ts.Close()
-	kafkaClient := newKafkaClient(ts.URL)
-	err := kafkaClient.DeleteTopic(ctx, classifier.New("test"))
-	assertions.NoError(err)
-}
-
 func newKafkaClient(agentUrl string) *MaasClient {
-	crudClient := &CrudClient{MaasAgentUrl: agentUrl, Namespace: testNamespace, HttpClient: resty.New(), RetryAttempts: defaultRetryAttempts, RetryInterval: defaultRetryInterval}
+	crudClient := &CrudClient{MaasAgentUrl: agentUrl, Namespace: testNamespace,
+		HttpClient: resty.New(), MaxTotalDuration: testMaxTotalDuration}
 	return &MaasClient{namespace: testNamespace, crudClient: crudClient}
 }
 

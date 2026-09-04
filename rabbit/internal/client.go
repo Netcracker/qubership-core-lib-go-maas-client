@@ -2,15 +2,14 @@ package internal
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/go-resty/resty/v2"
 	"github.com/netcracker/qubership-core-lib-go/v3/logging"
 	"github.com/netcracker/qubership-core-lib-go-maas-client/v3/classifier"
+	"github.com/netcracker/qubership-core-lib-go-maas-client/v3/internal/rest"
 	"github.com/netcracker/qubership-core-lib-go-maas-client/v3/rabbit/model"
-	"github.com/netcracker/qubership-core-lib-go-maas-client/v3/util"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -53,93 +52,45 @@ func (c *MaasClient) insureNamespacePresent(keys classifier.Keys) {
 }
 
 type CrudClient struct {
-	MaasAgentUrl  string
-	Namespace     string
-	HttpClient    *resty.Client
-	RetryAttempts int
-	RetryInterval time.Duration
-	// AttemptTimeout bounds one request, see util.AttemptContext.
+	MaasAgentUrl string
+	Namespace    string
+	HttpClient   *resty.Client
+	// MaxTotalDuration bounds a whole call, retries included.
+	MaxTotalDuration time.Duration
+	// AttemptTimeout bounds one request.
 	AttemptTimeout time.Duration
 }
 
-// retry wraps CRUD calls; util.Retry itself falls back to util.Default*
-// when RetryAttempts/RetryInterval are left unset.
-func (d *CrudClient) retry() *util.Retry {
-	return util.NewRetry(d.RetryAttempts, d.RetryInterval)
+// caller runs one CRUD call under this client's timeouts.
+func (d *CrudClient) caller() rest.Caller {
+	return rest.Caller{
+		HttpClient:       d.HttpClient,
+		Logger:           logger,
+		MaxTotalDuration: d.MaxTotalDuration,
+		AttemptTimeout:   d.AttemptTimeout,
+	}
 }
 
 func (d *CrudClient) GetOrCreateVhost(ctx context.Context, classifier classifier.Keys) (*model.Vhost, error) {
-	var result model.Vhost
-	respClassifier := util.NewResponseClassifier()
-	err := d.retry().RunCtx(ctx, func(ctx context.Context) error {
-		ctx, cancel := util.AttemptContext(ctx, d.AttemptTimeout)
-		defer cancel()
-
-		logger.InfoC(ctx, "Get or Create vhost by classifier %v", classifier)
-		request := d.HttpClient.R().SetContext(ctx).SetBody(classifier)
-
-		response, err := request.Post(d.MaasAgentUrl + "/api/v1/rabbit/vhost")
-		if err != nil {
-			return fmt.Errorf("failed to send request to maas-agent. Cause: %w", err)
-		}
-		logger.InfoC(ctx, "Received response: %d", response.StatusCode())
-		if !response.IsSuccess() {
-			return respClassifier.Classify(response.StatusCode(), response.Status(), response.String())
-		}
-		body := response.Body()
-		var vhost model.Vhost
-		pErr := json.Unmarshal(body, &vhost)
-		if pErr != nil {
-			return fmt.Errorf("failed to parse response from maas-agent. Cause: %w", pErr)
-		}
-		result = vhost
-		return nil
+	logger.InfoC(ctx, "Get or Create vhost by classifier %v", classifier)
+	response, err := d.caller().Send(ctx, func(request *resty.Request) (*resty.Response, error) {
+		return request.SetBody(classifier).Post(d.MaasAgentUrl + "/api/v1/rabbit/vhost")
 	})
 	if err != nil {
 		return nil, err
 	}
-	return &result, nil
+	return rest.Decode[model.Vhost](response)
 }
 
 func (d *CrudClient) GetVhost(ctx context.Context, classifier classifier.Keys) (*model.VhostConfig, error) {
-	var result model.VhostConfig
-	var notFound bool
-	respClassifier := util.NewResponseClassifier()
-	err := d.retry().RunCtx(ctx, func(ctx context.Context) error {
-		ctx, cancel := util.AttemptContext(ctx, d.AttemptTimeout)
-		defer cancel()
-
-		logger.InfoC(ctx, "Get vhost by classifier %v", classifier)
-		request := d.HttpClient.R().SetContext(ctx).SetBody(classifier)
-
-		response, err := request.Post(d.MaasAgentUrl + "/api/v1/rabbit/vhost/get-by-classifier")
-		if err != nil {
-			return fmt.Errorf("failed to send request to maas-agent. Cause: %w", err)
-		}
-		logger.InfoC(ctx, "Received response: %d", response.StatusCode())
-		if !response.IsSuccess() {
-			if response.StatusCode() == 404 {
-				notFound = true
-				return nil
-			}
-			return respClassifier.Classify(response.StatusCode(), response.Status(), response.String())
-		}
-		body := response.Body()
-		var vhost model.VhostConfig
-		pErr := json.Unmarshal(body, &vhost)
-		if pErr != nil {
-			return fmt.Errorf("failed to parse response from maas-agent. Cause: %w", pErr)
-		}
-		result = vhost
-		return nil
-	})
+	logger.InfoC(ctx, "Get vhost by classifier %v", classifier)
+	response, err := d.caller().Send(ctx, func(request *resty.Request) (*resty.Response, error) {
+		return request.SetBody(classifier).Post(d.MaasAgentUrl + "/api/v1/rabbit/vhost/get-by-classifier")
+	}, http.StatusNotFound)
 	if err != nil {
 		return nil, err
 	}
-	if notFound {
-		return nil, nil
-	}
-	return &result, nil
+	return rest.Decode[model.VhostConfig](response)
 }
 
 func (d *CrudClient) BuildHeaders(ctxData map[string]string) amqp.Table {

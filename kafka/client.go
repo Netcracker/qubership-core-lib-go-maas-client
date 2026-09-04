@@ -2,6 +2,8 @@ package kafka
 
 import (
 	"context"
+	"fmt"
+	"time"
 
 	"github.com/go-resty/resty/v2"
 	"github.com/gorilla/websocket"
@@ -13,23 +15,33 @@ import (
 	"github.com/netcracker/qubership-core-lib-go-maas-client/v3/watch"
 )
 
-// NewClient builds a Kafka MaaS client.
-//
-// httpClient must not retry on its own: this client already retries, and resty
-// retries multiply it, turning the configured attempts into their product.
-// Pass a plain resty.New() or one with SetRetryCount(0).
+// maxWatchWindow is the longest wait asked of maas-service.
+const maxWatchWindow = 60 * time.Second
+
+// watchWindow keeps the server-side wait below the client timeout, so the
+// server answers first instead of the client reporting a timeout.
+func watchWindow(httpClient *resty.Client) time.Duration {
+	timeout := httpClient.GetClient().Timeout
+	if timeout <= 0 {
+		return maxWatchWindow
+	}
+	return min(timeout-timeout/4, maxWatchWindow)
+}
+
+// NewClient builds a Kafka MaaS client. httpClient must not retry on its own:
+// this client retries, and resty retries would multiply it.
 func NewClient(namespace string, maasAgentUrl string, tenantManagerUrl string, httpClient *resty.Client,
 	dialer *websocket.Dialer, authSupplier func(ctx context.Context) (string, error)) MaasClient {
 	crudClient := &internal.CrudClient{
-		MaasAgentUrl:   maasAgentUrl,
-		Namespace:      namespace,
-		HttpClient:     httpClient,
-		RetryInterval:  util.DefaultRetryInterval,
-		RetryAttempts:  util.DefaultRetryAttempts,
-		AttemptTimeout: util.DefaultAttemptTimeout,
+		MaasAgentUrl:     maasAgentUrl,
+		Namespace:        namespace,
+		HttpClient:       httpClient,
+		MaxTotalDuration: util.DefaultMaxTotalDuration,
+		AttemptTimeout:   util.DefaultAttemptTimeout,
 	}
+	watchPath := fmt.Sprintf("/api/v2/kafka/topic/watch-create?timeout=%s", watchWindow(httpClient))
 	watchClient := watchInternal.NewClient[model.TopicAddress](maasAgentUrl,
-		"/api/v2/kafka/topic/watch-create?timeout=60s", httpClient, internal.ResponseToTopicAddress)
+		watchPath, httpClient, internal.ResponseToTopicAddress)
 	getResources := func(ctx context.Context, keys classifier.Keys, tenants []watch.Tenant) ([]model.TopicAddress, error) {
 		var topics []model.TopicAddress
 		for _, tenant := range tenants {

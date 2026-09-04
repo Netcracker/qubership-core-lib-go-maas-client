@@ -4,15 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
 	"github.com/go-resty/resty/v2"
 	"github.com/netcracker/qubership-core-lib-go/v3/logging"
 	"github.com/netcracker/qubership-core-lib-go-maas-client/v3/classifier"
+	"github.com/netcracker/qubership-core-lib-go-maas-client/v3/internal/rest"
 	"github.com/netcracker/qubership-core-lib-go-maas-client/v3/kafka/internal/watch"
 	"github.com/netcracker/qubership-core-lib-go-maas-client/v3/kafka/model"
-	"github.com/netcracker/qubership-core-lib-go-maas-client/v3/util"
 )
 
 var logger logging.Logger
@@ -85,122 +86,86 @@ func (c *MaasClient) insureNamespacePresent(keys classifier.Keys) {
 }
 
 type CrudClient struct {
-	MaasAgentUrl  string
-	Namespace     string
-	HttpClient    *resty.Client
-	RetryAttempts int
-	RetryInterval time.Duration
-	// AttemptTimeout bounds one request, see util.AttemptContext.
+	MaasAgentUrl string
+	Namespace    string
+	HttpClient   *resty.Client
+	// MaxTotalDuration bounds a whole call, retries included.
+	MaxTotalDuration time.Duration
+	// AttemptTimeout bounds one request.
 	AttemptTimeout time.Duration
 }
 
-func (d *CrudClient) GetOrCreateTopic(ctx context.Context, keys classifier.Keys, options ...model.TopicCreateOptions) (*model.TopicAddress, error) {
-	var topicAddress *model.TopicAddress
-	respClassifier := util.NewResponseClassifier()
-	err := util.NewRetry(d.RetryAttempts, d.RetryInterval).RunCtx(ctx, func(ctx context.Context) error {
-		ctx, cancel := util.AttemptContext(ctx, d.AttemptTimeout)
-		defer cancel()
+// caller runs one CRUD call under this client's timeouts.
+func (d *CrudClient) caller() rest.Caller {
+	return rest.Caller{
+		HttpClient:       d.HttpClient,
+		Logger:           logger,
+		MaxTotalDuration: d.MaxTotalDuration,
+		AttemptTimeout:   d.AttemptTimeout,
+	}
+}
 
-		var opt model.TopicCreateOptions
-		if len(options) == 1 {
-			opt = options[0]
-		} else if len(options) > 1 {
-			return fmt.Errorf("only 0 or 1 option is allowed")
-		}
-		reqBody := TopicRequest{
-			Name:              opt.Name,
-			Classifier:        keys,
-			ExternallyManaged: opt.ExternallyManaged,
-			NumPartitions:     opt.NumPartitions,
-			ReplicationFactor: opt.ReplicationFactor,
-			ReplicaAssignment: opt.ReplicaAssignment,
-			Configs:           opt.Configs,
-			Template:          opt.Template,
-		}
-		logger.InfoC(ctx, "Get or Create topic by classifier %v", keys)
-		request := d.HttpClient.R().SetContext(ctx).SetBody(reqBody)
+func (d *CrudClient) GetOrCreateTopic(ctx context.Context, keys classifier.Keys, options ...model.TopicCreateOptions) (*model.TopicAddress, error) {
+	if len(options) > 1 {
+		return nil, fmt.Errorf("only 0 or 1 option is allowed")
+	}
+	var opt model.TopicCreateOptions
+	if len(options) == 1 {
+		opt = options[0]
+	}
+	reqBody := TopicRequest{
+		Name:              opt.Name,
+		Classifier:        keys,
+		ExternallyManaged: opt.ExternallyManaged,
+		NumPartitions:     opt.NumPartitions,
+		ReplicationFactor: opt.ReplicationFactor,
+		ReplicaAssignment: opt.ReplicaAssignment,
+		Configs:           opt.Configs,
+		Template:          opt.Template,
+	}
+
+	logger.InfoC(ctx, "Get or Create topic by classifier %v", keys)
+	response, err := d.caller().Send(ctx, func(request *resty.Request) (*resty.Response, error) {
+		request.SetBody(reqBody)
 		if len(opt.OnTopicExists) > 0 {
 			request.SetQueryParam(OnTopicExistsQueryParam, string(opt.OnTopicExists))
 		}
-		response, err := request.Post(d.MaasAgentUrl + "/api/v1/kafka/topic")
-		if err != nil {
-			return fmt.Errorf("failed to send request to maas-agent. Cause: %w", err)
-		}
-		logger.InfoC(ctx, "Received response: %d", response.StatusCode())
-		if !response.IsSuccess() {
-			return respClassifier.Classify(response.StatusCode(), response.Status(), response.String())
-		}
-		var TopicResponse TopicResponse
-		body := response.Body()
-		pErr := json.Unmarshal(body, &TopicResponse)
-		if pErr != nil {
-			return fmt.Errorf("failed to parse response from maas-agent. Cause: %w", pErr)
-		}
-		topicAddress, err = newTopicAddress(TopicResponse)
-		if err != nil {
-			return fmt.Errorf("failed to Convert response to TopicAddress. Cause: %w", err)
-		}
-		return nil
+		return request.Post(d.MaasAgentUrl + "/api/v1/kafka/topic")
 	})
-	return topicAddress, err
+	if err != nil {
+		return nil, err
+	}
+	topicResponse, err := rest.Decode[TopicResponse](response)
+	if err != nil || topicResponse == nil {
+		return nil, err
+	}
+	return newTopicAddress(*topicResponse)
 }
 
 func (d *CrudClient) GetTopic(ctx context.Context, keys classifier.Keys) (*model.TopicAddress, error) {
-	var topicAddress *model.TopicAddress
-	respClassifier := util.NewResponseClassifier()
-	err := util.NewRetry(d.RetryAttempts, d.RetryInterval).RunCtx(ctx, func(ctx context.Context) error {
-		ctx, cancel := util.AttemptContext(ctx, d.AttemptTimeout)
-		defer cancel()
-
-		logger.InfoC(ctx, "Get topic by classifier %v", keys)
-		request := d.HttpClient.R().SetContext(ctx).SetBody(keys)
-		response, err := request.Post(d.MaasAgentUrl + "/api/v1/kafka/topic/get-by-classifier")
-		if err != nil {
-			return fmt.Errorf("failed to send request to maas-agent. Cause: %w", err)
-		}
-		logger.InfoC(ctx, "Received response: %d", response.StatusCode())
-		if response.StatusCode() == 404 {
-			return nil
-		}
-		if !response.IsSuccess() {
-			return respClassifier.Classify(response.StatusCode(), response.Status(), response.String())
-		}
-		var TopicResponse TopicResponse
-		body := response.Body()
-		pErr := json.Unmarshal(body, &TopicResponse)
-		if pErr != nil {
-			return fmt.Errorf("failed to parse response from maas-agent. Cause: %w", pErr)
-		}
-		topicAddress, err = newTopicAddress(TopicResponse)
-		if err != nil {
-			return fmt.Errorf("failed to Convert response to TopicAddress. Cause: %w", err)
-		}
-		return nil
-	})
-	return topicAddress, err
+	logger.InfoC(ctx, "Get topic by classifier %v", keys)
+	response, err := d.caller().Send(ctx, func(request *resty.Request) (*resty.Response, error) {
+		return request.SetBody(keys).Post(d.MaasAgentUrl + "/api/v1/kafka/topic/get-by-classifier")
+	}, http.StatusNotFound)
+	if err != nil {
+		return nil, err
+	}
+	topicResponse, err := rest.Decode[TopicResponse](response)
+	if err != nil || topicResponse == nil {
+		return nil, err
+	}
+	return newTopicAddress(*topicResponse)
 }
 
-func (d *CrudClient) DeleteTopic(ctx context.Context, classifier classifier.Keys) error {
-	respClassifier := util.NewResponseClassifier()
-	return util.NewRetry(d.RetryAttempts, d.RetryInterval).RunCtx(ctx, func(ctx context.Context) error {
-		ctx, cancel := util.AttemptContext(ctx, d.AttemptTimeout)
-		defer cancel()
-
-		body := TopicSearchRequest{Classifier: classifier}
-		logger.InfoC(ctx, "Get or Create topic by classifier %v", classifier)
-		request := d.HttpClient.R().SetContext(ctx).SetBody(body)
-		response, err := request.Delete(d.MaasAgentUrl + "/api/v1/kafka/topic")
-		if err != nil {
-			return fmt.Errorf("failed to send request to maas-agent. Cause: %w", err)
-		}
-		logger.InfoC(ctx, "Received response: %d", response.StatusCode())
-		if !response.IsSuccess() {
-			return respClassifier.Classify(response.StatusCode(), response.Status(), response.String())
-		}
-		return nil
+// DeleteTopic is retried: it reports only an error, so a repeat of a delete
+// whose response was lost answers the same as the first attempt.
+func (d *CrudClient) DeleteTopic(ctx context.Context, keys classifier.Keys) error {
+	logger.InfoC(ctx, "Delete topic by classifier %v", keys)
+	_, err := d.caller().Send(ctx, func(request *resty.Request) (*resty.Response, error) {
+		return request.SetBody(TopicSearchRequest{Classifier: keys}).Delete(d.MaasAgentUrl + "/api/v1/kafka/topic")
 	})
+	return err
 }
-
 
 func newTopicAddress(response TopicResponse) (*model.TopicAddress, error) {
 	bootstrapServers := make(map[string][]string)

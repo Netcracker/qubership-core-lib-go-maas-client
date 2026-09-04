@@ -13,6 +13,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// failoverRabbitClient builds a client with a total duration short enough for a test.
+func failoverRabbitClient(agentUrl string) *MaasClient {
+	return NewRabbitClient(testNamespace, &CrudClient{
+		MaasAgentUrl:     agentUrl,
+		Namespace:        testNamespace,
+		HttpClient:       resty.New(),
+		MaxTotalDuration: time.Second,
+	})
+}
+
 // Test_Failover_GetOrCreateVhost_RetriesOn500 checks that a transient 500 is
 // retried and eventually succeeds.
 func Test_Failover_GetOrCreateVhost_RetriesOn500(t *testing.T) {
@@ -31,14 +41,7 @@ func Test_Failover_GetOrCreateVhost_RetriesOn500(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	client := &CrudClient{
-		MaasAgentUrl:  ts.URL,
-		Namespace:     testNamespace,
-		HttpClient:    resty.New(),
-		RetryAttempts: 5,
-		RetryInterval: 5 * time.Millisecond,
-	}
-	rabbitClient := NewRabbitClient(testNamespace, client)
+	rabbitClient := failoverRabbitClient(ts.URL)
 
 	vhost, err := rabbitClient.GetOrCreateVhost(context.Background(), classifier.New("test"))
 	assertions.NoError(err)
@@ -59,54 +62,29 @@ func Test_Failover_GetOrCreateVhost_400NotRetried(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	client := &CrudClient{
-		MaasAgentUrl:  ts.URL,
-		Namespace:     testNamespace,
-		HttpClient:    resty.New(),
-		RetryAttempts: 5,
-		RetryInterval: 5 * time.Millisecond,
-	}
-	rabbitClient := NewRabbitClient(testNamespace, client)
+	rabbitClient := failoverRabbitClient(ts.URL)
 
 	_, err := rabbitClient.GetOrCreateVhost(context.Background(), classifier.New("test"))
 	assertions.Error(err)
 	assertions.Equal(int64(1), atomic.LoadInt64(&requestCount), "400 must fail immediately, not be retried")
 }
 
-// Test_Failover_GetOrCreateVhost_StaleFieldDoesNotLeakAcrossRetries checks that
-// a field set by a partially-parsed response on a failed attempt does not
-// survive into the result of a later, successful attempt whose body omits
-// that field.
-func Test_Failover_GetOrCreateVhost_StaleFieldDoesNotLeakAcrossRetries(t *testing.T) {
+// Test_Failover_GetOrCreateVhost_UnparseableBodyIsPermanent checks that a 200 the
+// client cannot parse fails on the spot: the same server answers the same way, so
+// repeating it only delays the error.
+func Test_Failover_GetOrCreateVhost_UnparseableBodyIsPermanent(t *testing.T) {
 	assertions := require.New(t)
 	var requestCount int64
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		attempt := atomic.AddInt64(&requestCount, 1)
+		atomic.AddInt64(&requestCount, 1)
 		w.WriteHeader(http.StatusOK)
-		if attempt == 1 {
-			// "password" parses first and sticks before "username" (a number
-			// instead of a string) aborts the unmarshal.
-			_, _ = w.Write([]byte(`{"password":"leaked-old-password","username":123}`))
-			return
-		}
-		// Second attempt succeeds and does not mention "password" at all.
-		_, _ = w.Write([]byte(`{"cnn":"amqp://second","username":"user2"}`))
+		_, _ = w.Write([]byte(`{"username":123}`)) // username is a string in the model
 	}))
 	defer ts.Close()
 
-	client := &CrudClient{
-		MaasAgentUrl:  ts.URL,
-		Namespace:     testNamespace,
-		HttpClient:    resty.New(),
-		RetryAttempts: 5,
-		RetryInterval: 5 * time.Millisecond,
-	}
-	rabbitClient := NewRabbitClient(testNamespace, client)
+	rabbitClient := failoverRabbitClient(ts.URL)
 
-	vhost, err := rabbitClient.GetOrCreateVhost(context.Background(), classifier.New("test"))
-	assertions.NoError(err)
-	assertions.NotNil(vhost)
-	assertions.Equal("amqp://second", vhost.Cnn)
-	assertions.Equal("", vhost.EncodedPassword,
-		"password from the failed first attempt must not leak into the successful result")
+	_, err := rabbitClient.GetOrCreateVhost(context.Background(), classifier.New("test"))
+	assertions.ErrorContains(err, "failed to parse response")
+	assertions.Equal(int64(1), atomic.LoadInt64(&requestCount), "a parse failure must not be retried")
 }
