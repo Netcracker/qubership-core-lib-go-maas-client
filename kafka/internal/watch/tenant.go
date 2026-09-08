@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"reflect"
+	"slices"
 	"sync"
 	"time"
 
@@ -16,6 +17,10 @@ import (
 	"github.com/netcracker/qubership-core-lib-go-maas-client/v3/watch"
 	go_stomp_websocket "github.com/netcracker/qubership-core-lib-go-stomp-websocket/v3"
 )
+
+// registrationAttempts bounds how many rounds a single Watch call may be dropped by
+// before it gives up.
+const registrationAttempts = 3
 
 type TenantWatchClient[T Resource] interface {
 	Watch(ctx context.Context, classifier classifier.Keys, callback func([]T, error)) error
@@ -133,13 +138,8 @@ func (b *TenantWatchBroadcaster[T]) Watch(ctx context.Context, classifierKey cla
 		return fmt.Errorf("classifier cannot contain '%s' param", classifier.TenantId)
 	}
 
-	b.lock.Lock()
-	watchId := b.watchCounter
-	b.watchCounter++
 	userCtx, cancelUserCtx := context.WithCancel(ctx)
-	logger.InfoC(userCtx, "Starting watcher#%d with name=%s, namespace=%s", watchId, name, namespace)
-	w := watcher[T]{
-		id:          watchId,
+	w := &watcher[T]{
 		name:        name,
 		namespace:   namespace,
 		callback:    callback,
@@ -148,31 +148,61 @@ func (b *TenantWatchBroadcaster[T]) Watch(ctx context.Context, classifierKey cla
 		queue:       make(chan []T, 1),
 		broadcaster: b,
 	}
-	b.watchers = append(b.watchers, &w)
-	// capture startOnce before unlocking: start() blocks and must not hold the lock
-	startOnce := b.startOnce
-	b.lock.Unlock()
 
-	var err error
-	startOnce.Do(func() {
-		err = b.start()
-	})
+	// A round that gives up drops every watcher and swaps startOnce. A call that is
+	// inside start() while that happens finds its own registration gone, so it is
+	// repeated against the round current by then.
+	for attempt := 0; attempt < registrationAttempts; attempt++ {
+		b.lock.Lock()
+		w.id = b.watchCounter
+		b.watchCounter++
+		b.watchers = append(b.watchers, w)
+		// capture startOnce before unlocking: start() blocks and must not hold the lock
+		startOnce := b.startOnce
+		b.lock.Unlock()
 
-	// bind the watcher to the round active now, so a later round cannot race with it
-	b.lock.RLock()
-	procCtx := b.internalProcCtx
-	b.lock.RUnlock()
+		logger.InfoC(userCtx, "Starting watcher#%d with name=%s, namespace=%s", w.id, name, namespace)
 
-	go w.run(procCtx)
-	logger.InfoC(userCtx, "Started watcher#%d", watchId)
-	// re-enqueue tenants for the just added watcher. Bound to the round: b.tenants is
-	// unbuffered, so an unguarded send would leak into the next round.
-	go func(procCtx context.Context, tenants []watch.Tenant) {
-		select {
-		case b.tenants <- tenants:
-		case <-procCtx.Done():
+		var err error
+		startOnce.Do(func() {
+			err = b.start()
+		})
+		if err != nil {
+			return b.failWatch(w, err)
 		}
-	}(procCtx, b.snapshotTenants())
+
+		// bind the watcher to the round active now, so a later round cannot race with it
+		b.lock.RLock()
+		procCtx := b.internalProcCtx
+		registered := slices.Contains(b.watchers, w)
+		b.lock.RUnlock()
+		if !registered {
+			continue
+		}
+
+		go w.run(procCtx)
+		logger.InfoC(userCtx, "Started watcher#%d", w.id)
+		// re-enqueue tenants for the just added watcher. Bound to the round: b.tenants is
+		// unbuffered, so an unguarded send would leak into the next round.
+		go func(procCtx context.Context, tenants []watch.Tenant) {
+			select {
+			case b.tenants <- tenants:
+			case <-procCtx.Done():
+			}
+		}(procCtx, b.snapshotTenants())
+		return nil
+	}
+
+	return b.failWatch(w, fmt.Errorf(
+		"watcher with name=%s, namespace=%s was dropped by a reconnect before it could be registered", name, namespace))
+}
+
+// failWatch ends a subscription that never came up. The error is returned and
+// also handed to the callback, which is where a caller driving reconnection
+// waits for it.
+func (b *TenantWatchBroadcaster[T]) failWatch(w *watcher[T], err error) error {
+	w.cancel()
+	go w.process(nil, err)
 	return err
 }
 

@@ -21,6 +21,7 @@ Go client to preform operations with MaaS
     * [MaaS Rabbit client API](#maas-rabbit-client-api)
     * [Create MaaS Rabbit go client with Cloud-Core default configuration](#create-maas-rabbit-go-client-with-cloud-core-default-configuration)
   * [Retry behaviour](#retry-behaviour)
+  * [Errors](#errors)
 <!-- TOC -->
 
 ## Kafka
@@ -62,20 +63,16 @@ To create MaaS rabbit go client with Cloud-Core defaults use the following libra
 ## Retry behaviour
 
 Every CRUD call to maas-agent (Kafka and Rabbit alike) is retried, bounded by a
-single setting: `CrudClient.MaxTotalDuration` (`util.DefaultMaxTotalDuration`,
-60s), the total duration of one call, retries included. The pauses and how many
-attempts fit derive from it: the first pause is `util.DefaultRetryInterval`,
-each next one doubles, and the cap is a quarter of the total. Pauses carry
-+/-20% jitter so concurrent callers do not retry in lockstep.
+single value: the total duration of one call, retries included, 60s. The pauses
+and how many attempts fit derive from it: the first pause is a second, each next
+one doubles, and the cap is a quarter of the total. Pauses carry +/-20% jitter so
+concurrent callers do not retry in lockstep.
 
-The deadline travels on the context handed to each attempt, so `AttemptTimeout`
-(`util.DefaultAttemptTimeout`, 30s) can never overrun it, and a shorter caller
-deadline still wins.
+The deadline travels on the context handed to each attempt, so the per-attempt
+timeout of 30s can never overrun it, and a shorter caller deadline still wins.
 
-`NewClient` reads `util.DefaultMaxTotalDuration` when it builds the client, so
-change it before constructing one. A response the client cannot parse is not
-retried: the same server answers the same way, so repeating it only delays the
-error.
+A response the client cannot parse is not retried: the same server answers the
+same way, so repeating it only delays the error.
 
 The 60s default is meant to outlast a database leader switchover while still
 failing fast enough to react to a real outage.
@@ -106,20 +103,55 @@ attempt. The Java client excludes it, because there the response carries a count
 of deleted topics that a repeat would report as zero.
 
 The watch endpoint is excluded: it is a long poll with its own loop and its own
-backoff, and its window derives from the HTTP client timeout so that
-maas-service answers before the client gives up.
+backoff, and its window derives from the HTTP client timeout so that maas-service
+answers before the client gives up. A client without a timeout, which is what
+`qubership-core-lib-go-maas-core` builds, gets the full 60s window.
 
 Retries live in this library only. The resty client from
 `qubership-core-lib-go-maas-core` is built without its own retries and without a
 client-wide timeout — see its README for why.
 
-`util.Retry{Attempts, Interval}` and `util.NewRetry(attempts, interval)` are
-still available for callers that bound work by attempt count; the clients use
-`util.NewRetryWithin(maxTotal)`. Three details of `Retry.Run` changed for those
-callers: a zero `Attempts` now runs the task once with the package defaults
-instead of skipping it entirely, the last failure is returned as it is instead of
-wrapped in `failed after N retries`, and there is no pause after the final
-attempt.
+Both bounds are tunable per client:
 
-`GetTopic`/`GetVhost` keep treating `404` as "not found" and return `nil` after
-a single request.
+```go
+client := kafka.NewClient(namespace, agentUrl, tenantManagerUrl, httpClient, dialer, authSupplier,
+    util.WithMaxTotalDuration(30*time.Second),
+    util.WithAttemptTimeout(5*time.Second))
+```
+
+| Option | What it bounds | Default |
+|---|---|---|
+| `util.WithMaxTotalDuration` | one call from start to finish, every retry and pause included. This is the longest a caller can be kept waiting, and the only thing that decides when the client gives up | 60s |
+| `util.WithAttemptTimeout` | one request inside that call. It only limits how long a single attempt may hang; the call continues retrying within the total | 30s |
+
+Shorten the total duration when a caller cannot wait a minute — a request path
+with a user on the other end. Shorten the attempt timeout when the agent tends to
+accept the connection and then go silent, so an attempt is abandoned earlier and
+more of them fit into the total. Raising the attempt timeout above the total has
+no effect: an attempt never gets more than what is left of the call.
+
+`rabbit.NewClient` takes the same options. What is left unset keeps the default,
+and the retry machinery itself stays internal. `util.Retry{Attempts, Interval}`
+and `util.NewRetry(attempts, interval)` stay as they were, for callers that bound
+their own work by attempt count.
+
+## Errors
+
+A call that ends on a response carries `*util.HttpError` with the status, so a
+caller does not have to read the message:
+
+```go
+var httpErr *util.HttpError
+if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusConflict {
+    // the classifier is taken
+}
+```
+
+A call that kept failing until its duration ran out carries
+`*util.RetriesExhaustedError`, which wraps the last failure. That is what
+separates an agent that never recovered from a request that was wrong to begin
+with: a wrong request fails on the first attempt and carries only
+`*util.HttpError`.
+
+`GetTopic`/`GetVhost` keep treating `404` as "not found": the call ends
+successfully with `nil`, and the `404` itself is never retried.

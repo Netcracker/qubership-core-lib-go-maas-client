@@ -12,6 +12,9 @@ import (
 	"github.com/netcracker/qubership-core-lib-go/v3/logging"
 )
 
+// defaultMaxRetryInterval caps the backoff between failed watch requests.
+const defaultMaxRetryInterval = 30 * time.Second
+
 var logger logging.Logger
 
 func init() {
@@ -35,7 +38,7 @@ func NewClient[T Resource](maasAgentUrl string, watchPath string,
 		converter:        responseToResources,
 		watchLock:        &sync.RWMutex{},
 		RetryInterval:    util.DefaultRetryInterval,
-		MaxRetryInterval: util.DefaultMaxRetryInterval,
+		MaxRetryInterval: defaultMaxRetryInterval,
 	}
 }
 
@@ -51,7 +54,7 @@ type DefaultClient[T Resource] struct {
 	MaxRetryInterval time.Duration
 }
 
-// retryIntervals returns the backoff bounds, falling back to util.Default* when
+// retryIntervals returns the backoff bounds, falling back to the defaults when
 // the client was built without NewClient.
 func (d *DefaultClient[T]) retryIntervals() (time.Duration, time.Duration) {
 	interval := d.RetryInterval
@@ -60,7 +63,7 @@ func (d *DefaultClient[T]) retryIntervals() (time.Duration, time.Duration) {
 	}
 	maxInterval := d.MaxRetryInterval
 	if maxInterval <= 0 {
-		maxInterval = util.DefaultMaxRetryInterval
+		maxInterval = defaultMaxRetryInterval
 	}
 	return interval, maxInterval
 }

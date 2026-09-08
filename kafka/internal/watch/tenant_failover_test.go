@@ -182,3 +182,111 @@ func Test_TenantWatch_UndrainedWatcherDoesNotWedgeNotify(t *testing.T) {
 		t.Fatal("notifyWatchers is stuck on a queue nobody drains")
 	}
 }
+
+// A call that joins a round which then gives up has its registration dropped by
+// the cleanup. It must re-register against the next round rather than return
+// nil, which the caller would read as a live subscription.
+func Test_TenantWatch_DroppedRegistrationReturnsError(t *testing.T) {
+	origAttempts := util.DefaultRetryAttempts
+	origInterval := util.DefaultRetryInterval
+	util.DefaultRetryAttempts = 0 // a round gives up on its first failure
+	util.DefaultRetryInterval = time.Millisecond
+	defer func() {
+		util.DefaultRetryAttempts = origAttempts
+		util.DefaultRetryInterval = origInterval
+	}()
+
+	var client *TenantWatchBroadcaster[testResource]
+	var connectCalls int32
+	var secondJoined atomic.Bool
+	client = NewTenantWatchClient[testResource](
+		"http://example.com",
+		func(ctx context.Context, keys classifier.Keys, tenants []watch.Tenant) ([]testResource, error) {
+			return nil, nil
+		},
+		nil,
+		func(ctx context.Context) (string, error) { return "token", nil },
+	)
+	client.connectToWebSocket = func(ctx context.Context, tenantManagerUrl string, dialer *websocket.Dialer,
+		authSupplier func(ctx context.Context) (string, error), onConnect func()) error {
+		// hold the first round open until the second call has joined it, so that call
+		// is inside startOnce.Do when the round is torn down
+		if atomic.AddInt32(&connectCalls, 1) == 1 {
+			secondJoined.Store(waitForWatchers(client, 2))
+		}
+		return errors.New("connection refused")
+	}
+
+	callback := func(resources []testResource, err error) {}
+	first := make(chan error, 1)
+	go func() {
+		first <- client.Watch(context.Background(),
+			classifier.Keys{classifier.Name: "r1", classifier.Namespace: "ns"}, callback)
+	}()
+
+	second := client.Watch(context.Background(),
+		classifier.Keys{classifier.Name: "r2", classifier.Namespace: "ns"}, callback)
+
+	require.True(t, secondJoined.Load(), "the second call did not join the first round, the window was not exercised")
+	require.Error(t, second, "a call whose registration was dropped must not report success")
+	require.Error(t, <-first)
+	assert.GreaterOrEqual(t, int(atomic.LoadInt32(&connectCalls)), 2, "the dropped call must open a round of its own")
+}
+
+// A Watch that never came up reports through the callback as well as through
+// the returned error. Callers drive their reconnect loop from the callback, so
+// dropping it there leaves them waiting.
+func Test_TenantWatch_FailedStartReachesTheCallback(t *testing.T) {
+	origAttempts := util.DefaultRetryAttempts
+	origInterval := util.DefaultRetryInterval
+	util.DefaultRetryAttempts = 0
+	util.DefaultRetryInterval = time.Millisecond
+	defer func() {
+		util.DefaultRetryAttempts = origAttempts
+		util.DefaultRetryInterval = origInterval
+	}()
+
+	client := NewTenantWatchClient[testResource](
+		"http://example.com",
+		func(ctx context.Context, keys classifier.Keys, tenants []watch.Tenant) ([]testResource, error) {
+			return nil, nil
+		},
+		nil,
+		func(ctx context.Context) (string, error) { return "token", nil },
+	)
+	client.connectToWebSocket = func(ctx context.Context, tenantManagerUrl string, dialer *websocket.Dialer,
+		authSupplier func(ctx context.Context) (string, error), onConnect func()) error {
+		return errors.New("connection refused")
+	}
+
+	notified := make(chan error, 1)
+	err := client.Watch(context.Background(),
+		classifier.Keys{classifier.Name: "r1", classifier.Namespace: "ns"},
+		func(resources []testResource, err error) {
+			select {
+			case notified <- err:
+			default:
+			}
+		})
+	require.Error(t, err)
+
+	select {
+	case callbackErr := <-notified:
+		assert.Error(t, callbackErr)
+	case <-time.After(2 * time.Second):
+		t.Fatal("the failure never reached the callback")
+	}
+}
+
+func waitForWatchers[T Resource](b *TenantWatchBroadcaster[T], count int) bool {
+	for i := 0; i < 200; i++ {
+		b.lock.RLock()
+		registered := len(b.watchers)
+		b.lock.RUnlock()
+		if registered >= count {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return false
+}

@@ -11,7 +11,6 @@ import (
 
 	"github.com/go-resty/resty/v2"
 	"github.com/netcracker/qubership-core-lib-go/v3/logging"
-	"github.com/netcracker/qubership-core-lib-go-maas-client/v3/util"
 )
 
 // Caller runs CRUD calls to maas-agent.
@@ -28,10 +27,9 @@ type Caller struct {
 // emptyOn end the call successfully with a nil response.
 func (c Caller) Send(ctx context.Context, send func(*resty.Request) (*resty.Response, error),
 	emptyOn ...int) (*resty.Response, error) {
-	classifier := util.NewResponseClassifier()
 	var result *resty.Response
-	err := util.NewRetryWithin(c.MaxTotalDuration).RunCtx(ctx, func(ctx context.Context) error {
-		ctx, cancel := util.AttemptContext(ctx, c.AttemptTimeout)
+	err := retry(ctx, c.MaxTotalDuration, func(ctx context.Context) error {
+		ctx, cancel := attemptContext(ctx, c.AttemptTimeout)
 		defer cancel()
 
 		result = nil
@@ -44,7 +42,7 @@ func (c Caller) Send(ctx context.Context, send func(*resty.Request) (*resty.Resp
 			return nil
 		}
 		if !response.IsSuccess() {
-			return classifier.Classify(response.StatusCode(), response.Status(), response.String())
+			return classifyResponse(response.StatusCode(), response.Status(), response.String())
 		}
 		result = response
 		return nil

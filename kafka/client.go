@@ -31,13 +31,15 @@ func watchWindow(httpClient *resty.Client) time.Duration {
 // NewClient builds a Kafka MaaS client. httpClient must not retry on its own:
 // this client retries, and resty retries would multiply it.
 func NewClient(namespace string, maasAgentUrl string, tenantManagerUrl string, httpClient *resty.Client,
-	dialer *websocket.Dialer, authSupplier func(ctx context.Context) (string, error)) MaasClient {
+	dialer *websocket.Dialer, authSupplier func(ctx context.Context) (string, error),
+	options ...util.Option) MaasClient {
+	bounds := util.NewOptions(options...)
 	crudClient := &internal.CrudClient{
 		MaasAgentUrl:     maasAgentUrl,
 		Namespace:        namespace,
 		HttpClient:       httpClient,
-		MaxTotalDuration: util.DefaultMaxTotalDuration,
-		AttemptTimeout:   util.DefaultAttemptTimeout,
+		MaxTotalDuration: bounds.MaxTotalDuration,
+		AttemptTimeout:   bounds.AttemptTimeout,
 	}
 	watchPath := fmt.Sprintf("/api/v2/kafka/topic/watch-create?timeout=%s", watchWindow(httpClient))
 	watchClient := watchInternal.NewClient[model.TopicAddress](maasAgentUrl,
