@@ -119,3 +119,35 @@ func TestWatchOnCreateResources_RecoversAfterTransientErrors(t *testing.T) {
 		t.Fatal("timeout waiting for callback after transient errors")
 	}
 }
+
+// The pause doubles per consecutive failure, stops at the cap, and stays within
+// the jitter band around each step.
+func Test_WatchBackoff_GrowsAndIsCapped(t *testing.T) {
+	const interval = time.Second
+	const maxInterval = 4 * time.Second
+
+	steps := []struct {
+		failures int
+		expected time.Duration
+	}{
+		{1, time.Second}, {2, 2 * time.Second}, {3, 4 * time.Second},
+		{4, maxInterval}, {10, maxInterval},
+	}
+	for _, step := range steps {
+		backoff := watchBackoff(step.failures, interval, maxInterval)
+		assert.InDelta(t, float64(step.expected), float64(backoff), float64(step.expected)*jitterFactor,
+			"backoff after %d failures", step.failures)
+	}
+}
+
+// Jitter is what keeps clients that lost the same agent apart, so two pauses
+// after the same number of failures must not be identical.
+func Test_WatchBackoff_IsJittered(t *testing.T) {
+	first := watchBackoff(3, time.Second, time.Minute)
+	for i := 0; i < 20; i++ {
+		if watchBackoff(3, time.Second, time.Minute) != first {
+			return
+		}
+	}
+	t.Fatal("every backoff came out the same, so the pause carries no jitter")
+}

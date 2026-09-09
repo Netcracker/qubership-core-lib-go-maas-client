@@ -18,9 +18,9 @@ now wait for a new leader to appear.
 - A per-attempt timeout, 30s. It is taken from what is left of the call
   deadline, so it cannot overrun it, and a shorter caller deadline still wins.
   Neither level had a timeout before, so a hung agent held a call indefinitely.
-- A linear backoff between failed watch requests, one second per failure and
-  capped at 30s, reset on success. The watch loop used to send the next request
-  immediately, hammering the agent exactly while it was coming back up.
+- A backoff between failed watch requests: one second, doubling, capped at 30s,
+  with +/-20% jitter and reset on success. The watch loop used to send the next
+  request immediately, hammering the agent exactly while it was coming back up.
 - `util.WithMaxTotalDuration` and `util.WithAttemptTimeout`, accepted by
   `kafka.NewClient` and `rabbit.NewClient`. Neither bound was reachable from a
   service before.

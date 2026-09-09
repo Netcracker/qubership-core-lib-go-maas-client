@@ -3,6 +3,7 @@ package watch
 import (
 	"context"
 	"errors"
+	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -12,8 +13,15 @@ import (
 	"github.com/netcracker/qubership-core-lib-go/v3/logging"
 )
 
-// defaultMaxRetryInterval caps the backoff between failed watch requests.
-const defaultMaxRetryInterval = 30 * time.Second
+const (
+	// defaultMaxRetryInterval caps the backoff between failed watch requests.
+	defaultMaxRetryInterval = 30 * time.Second
+	// backoffMultiplier grows the pause after each consecutive failure.
+	backoffMultiplier = 2
+	// jitterFactor keeps clients that lost the same agent from returning to it
+	// at the same moment.
+	jitterFactor = 0.2
+)
 
 var logger logging.Logger
 
@@ -49,9 +57,22 @@ type DefaultClient[T Resource] struct {
 	watchLock   *sync.RWMutex
 	converter   func(response *resty.Response) ([]T, error)
 
-	// Linear, capped backoff between failed watch requests.
+	// Growing, capped backoff between failed watch requests.
 	RetryInterval    time.Duration
 	MaxRetryInterval time.Duration
+}
+
+// watchBackoff is the pause after a number of consecutive failures: it doubles
+// each time, stops at maxInterval and carries +/-20% jitter.
+func watchBackoff(failures int, interval, maxInterval time.Duration) time.Duration {
+	backoff := interval
+	for i := 1; i < failures && backoff < maxInterval; i++ {
+		backoff *= backoffMultiplier
+	}
+	if backoff > maxInterval {
+		backoff = maxInterval
+	}
+	return time.Duration(float64(backoff) * (1 + jitterFactor*(2*rand.Float64()-1)))
 }
 
 // retryIntervals returns the backoff bounds, falling back to the defaults when
@@ -147,15 +168,11 @@ func (d *DefaultClient[T]) WatchOnCreateResources(ctx context.Context, keys clas
 				}
 				failures++
 				retryInterval, maxRetryInterval := d.retryIntervals()
-				backoff := time.Duration(failures) * retryInterval
-				if backoff > maxRetryInterval {
-					backoff = maxRetryInterval
-				}
 				select {
 				case <-ctx.Done():
 					watchersChan <- watchHolders
 					return
-				case <-time.After(backoff):
+				case <-time.After(watchBackoff(failures, retryInterval, maxRetryInterval)):
 				}
 			}
 		}

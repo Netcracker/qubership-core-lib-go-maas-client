@@ -103,8 +103,9 @@ attempt. The Java client excludes it, because there the response carries a count
 of deleted topics that a repeat would report as zero.
 
 The watch endpoint is excluded: it is a long poll with its own loop and its own
-backoff, and its window derives from the HTTP client timeout so that maas-service
-answers before the client gives up. A client without a timeout, which is what
+backoff — one second between failed polls, doubling, capped at 30s and jittered,
+reset on success — and its window derives from the HTTP client timeout so that
+maas-service answers before the client gives up. A client without a timeout, which is what
 `qubership-core-lib-go-maas-core` builds, gets the full 60s window.
 
 Retries live in this library only. The resty client from
