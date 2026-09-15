@@ -71,10 +71,16 @@ func (d *CrudClient) caller() rest.Caller {
 	}
 }
 
+// vhostRequest is the body /api/v1/rabbit/vhost expects. The neighbouring
+// get-by-classifier endpoint takes the bare classifier instead.
+type vhostRequest struct {
+	Classifier classifier.Keys `json:"classifier"`
+}
+
 func (d *CrudClient) GetOrCreateVhost(ctx context.Context, classifier classifier.Keys) (*model.Vhost, error) {
 	logger.InfoC(ctx, "Get or Create vhost by classifier %v", classifier)
 	response, err := d.caller().Send(ctx, func(request *resty.Request) (*resty.Response, error) {
-		return request.SetBody(classifier).Post(d.MaasAgentUrl + "/api/v1/rabbit/vhost")
+		return request.SetBody(vhostRequest{Classifier: classifier}).Post(d.MaasAgentUrl + "/api/v1/rabbit/vhost")
 	})
 	if err != nil {
 		return nil, err
