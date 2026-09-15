@@ -51,13 +51,23 @@ func retry(parent context.Context, maxTotal time.Duration, task func(ctx context
 	ctx, cancel := context.WithTimeout(parent, maxTotal)
 	defer cancel()
 
+	var lastErr error
 	err := failsafe.With[any](retryPolicy(maxTotal)).WithContext(ctx).Run(func() error {
-		return task(ctx)
+		attemptErr := task(ctx)
+		if attemptErr != nil {
+			lastErr = attemptErr
+		}
+		return attemptErr
 	})
 	// what is left once a non-retryable error and the caller's own cancellation
 	// are excluded is the duration running out
 	if err == nil || isNonRetryable(err) || parent.Err() != nil {
 		return err
+	}
+	// the policy and the context hold the same deadline, so either can end the call;
+	// when the context wins it reports its own error and buries what kept failing
+	if errors.Is(err, context.DeadlineExceeded) && lastErr != nil {
+		err = lastErr
 	}
 	return &util.RetriesExhaustedError{Duration: maxTotal, Cause: err}
 }
