@@ -6,6 +6,8 @@ All notable changes to this library are documented here. The format follows
 
 ## [Unreleased]
 
+## [3.7.0] - 2026-09-17
+
 These changes are designed to ensure the continuous operation of the database or 
 queue in the event of a failure or a leader change. when `maas-service` points to a 
 node that has switched to follower mode, requests that previously failed immediately 
