@@ -20,6 +20,8 @@ Go client to preform operations with MaaS
   * [Rabbit](#rabbit)
     * [MaaS Rabbit client API](#maas-rabbit-client-api)
     * [Create MaaS Rabbit go client with Cloud-Core default configuration](#create-maas-rabbit-go-client-with-cloud-core-default-configuration)
+  * [Retry behaviour](#retry-behaviour)
+  * [Errors](#errors)
 <!-- TOC -->
 
 ## Kafka
@@ -57,3 +59,100 @@ MaaS Rabbit client to preform MaaS operations related to Rabbit
 To create MaaS rabbit go client with Cloud-Core defaults use the following library extension
 [libs/go/maas/core](https://github.com/netcracker/qubership-core-lib-go-maas-core)
 
+
+## Retry behaviour
+
+Every CRUD call to maas-agent (Kafka and Rabbit alike) is retried, bounded by a
+single value: the total duration of one call, retries included, 60s. The pauses
+and how many attempts fit derive from it: the first pause is a second, each next
+one doubles, and the cap is a quarter of the total. Pauses carry +/-20% jitter so
+concurrent callers do not retry in lockstep.
+
+The deadline travels on the context handed to each attempt, so the per-attempt
+timeout of 30s can never overrun it, and a shorter caller deadline still wins.
+
+A response the client cannot parse is not retried: the same server answers the
+same way, so repeating it only delays the error.
+
+The 60s default is meant to outlast a database leader switchover while still
+failing fast enough to react to a real outage.
+
+Which responses are retried:
+
+| Response | Retried | Why |
+|---|---|---|
+| transport error | yes | connection refused/reset while the agent is being rescheduled |
+| 5xx | yes | includes the `500` maas-agent returns when it cannot reach maas-service at all |
+| 429 | yes | throttling |
+| **405** | **only when the `reason` names a database that cannot be written** | maas-service maps PostgreSQL error `25006` (READ ONLY SQL TRANSACTION) to `405`, so a write against a demoted Patroni node during a switchover arrives as `405`, not as `5xx`. A plain `405` — a route removed on the server, an ingress rejecting the method — is permanent and fails fast |
+| 401 | no | the token provider refreshes on its own schedule, so a retry within the backoff re-sends the same token |
+| other 4xx | no | permanent client errors, failed on the first attempt |
+
+The 405 entry is deliberate: the usual "retry 5xx, fail fast on 4xx" rule does
+not survive a database leader switchover here.
+
+The `reason` of the error envelope is what decides, not the error code: every
+maas-service error carries the same code, so the envelope alone says nothing. The
+match is loose — the reason has to mention a database together with `read-only`
+or `not active` — so a reworded message on the server still counts, while a `405`
+about a read-only *field* does not.
+
+`DeleteTopic` is retried like any other call: it reports only an error, so a
+repeat of a delete whose response was lost answers the same as the first
+attempt. The Java client excludes it, because there the response carries a count
+of deleted topics that a repeat would report as zero.
+
+The watch endpoint is excluded: it is a long poll with its own loop and its own
+backoff — one second between failed polls, doubling, capped at 30s and jittered,
+reset on success — and its window derives from the HTTP client timeout so that
+maas-service answers before the client gives up. A client without a timeout, which is what
+`qubership-core-lib-go-maas-core` builds, gets the full 60s window.
+
+Retries live in this library only. The resty client from
+`qubership-core-lib-go-maas-core` is built without its own retries and without a
+client-wide timeout — see its README for why.
+
+Both bounds are tunable per client:
+
+```go
+client := kafka.NewClient(namespace, agentUrl, tenantManagerUrl, httpClient, dialer, authSupplier,
+    util.WithMaxTotalDuration(30*time.Second),
+    util.WithAttemptTimeout(5*time.Second))
+```
+
+| Option | What it bounds | Default |
+|---|---|---|
+| `util.WithMaxTotalDuration` | one call from start to finish, every retry and pause included. This is the longest a caller can be kept waiting, and the only thing that decides when the client gives up | 60s |
+| `util.WithAttemptTimeout` | one request inside that call. It only limits how long a single attempt may hang; the call continues retrying within the total | 30s |
+
+Shorten the total duration when a caller cannot wait a minute — a request path
+with a user on the other end. Shorten the attempt timeout when the agent tends to
+accept the connection and then go silent, so an attempt is abandoned earlier and
+more of them fit into the total. Raising the attempt timeout above the total has
+no effect: an attempt never gets more than what is left of the call.
+
+`rabbit.NewClient` takes the same options. What is left unset keeps the default,
+and the retry machinery itself stays internal. `util.Retry{Attempts, Interval}`
+and `util.NewRetry(attempts, interval)` stay as they were, for callers that bound
+their own work by attempt count.
+
+## Errors
+
+A call that ends on a response carries `*util.HttpError` with the status, so a
+caller does not have to read the message:
+
+```go
+var httpErr *util.HttpError
+if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusConflict {
+    // the classifier is taken
+}
+```
+
+A call that kept failing until its duration ran out carries
+`*util.RetriesExhaustedError`, which wraps the last failure. That is what
+separates an agent that never recovered from a request that was wrong to begin
+with: a wrong request fails on the first attempt and carries only
+`*util.HttpError`.
+
+`GetTopic`/`GetVhost` keep treating `404` as "not found": the call ends
+successfully with `nil`, and the `404` itself is never retried.

@@ -2,9 +2,10 @@ package util
 
 import (
 	"errors"
-	"github.com/stretchr/testify/require"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func Test_NewRetry(t *testing.T) {
@@ -23,25 +24,20 @@ func Test_RetryRun(t *testing.T) {
 		attempt--
 		if attempt > 0 {
 			return errors.New("test")
-		} else {
-			return nil
 		}
+		return nil
 	})
 	assertions.NoError(err)
 }
 
 func Test_RetryRunError(t *testing.T) {
 	assertions := require.New(t)
-	attempts := 10
-	retry := NewRetry(attempts, 10*time.Millisecond)
-	attempt := attempts + 1
+	retry := NewRetry(3, 10*time.Millisecond)
+	calls := 0
 	err := retry.Run(func() error {
-		attempt--
-		if attempt > 0 {
-			return errors.New("test")
-		} else {
-			return nil
-		}
+		calls++
+		return errors.New("test")
 	})
-	assertions.Equal("failed after 10 retries: test", err.Error())
+	assertions.EqualError(err, "failed after 3 attempts: test")
+	assertions.Equal(3, calls)
 }
