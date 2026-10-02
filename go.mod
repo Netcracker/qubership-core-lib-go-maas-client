@@ -3,7 +3,7 @@ module github.com/netcracker/qubership-core-lib-go-maas-client/v3
 go 1.26.5
 
 require (
-	github.com/failsafe-go/failsafe-go v0.9.7
+	github.com/failsafe-go/failsafe-go v0.9.8
 	github.com/go-resty/resty/v2 v2.17.2
 	github.com/gorilla/websocket v1.5.3
 	github.com/netcracker/qubership-core-lib-go-stomp-websocket/v3 v3.6.1
