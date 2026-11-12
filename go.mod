@@ -6,8 +6,8 @@ require (
 	github.com/failsafe-go/failsafe-go v0.9.8
 	github.com/go-resty/resty/v2 v2.17.2
 	github.com/gorilla/websocket v1.5.3
-	github.com/netcracker/qubership-core-lib-go-stomp-websocket/v3 v3.6.5
-	github.com/netcracker/qubership-core-lib-go/v3 v3.15.3
+	github.com/netcracker/qubership-core-lib-go-stomp-websocket/v3 v3.6.6
+	github.com/netcracker/qubership-core-lib-go/v3 v3.15.4
 	github.com/rabbitmq/amqp091-go v1.16.0
 	github.com/stretchr/testify v1.12.1
 )
